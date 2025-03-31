@@ -303,65 +303,164 @@ func (rl *RedisRateWaiter) Wait(ctx context.Context, n int) error {
 	// Redis限流算法实现
 	// 使用Redis的令牌桶算法实现（lua脚本）
 	script := redis.NewScript(`
-local key = KEYS[1]
-local tokens_requested = tonumber(ARGV[1])
--- rate表示每秒产生的令牌数量（tokens/second）,用于根据经过的时间计算新增的令牌数
-local rate = tonumber(ARGV[2])
-local capacity = tonumber(ARGV[3])
-local now = tonumber(ARGV[4])
-local ttl = tonumber(ARGV[5])
-
--- 获取当前桶状态,如果不存在则创建
-local bucket = redis.call('hmget', key, 'tokens', 'last_update')
-local tokens
-local last_update
-
-if bucket[1] == false then
--- 新建桶,填满令牌
-tokens = capacity
-last_update = now
-else
-tokens = tonumber(bucket[1])
-last_update = tonumber(bucket[2])
-
--- 计算从上次更新到现在应该添加多少令牌
-local elapsed = math.max(0, now - last_update)
--- 将elapsed从纳秒转换为秒
-local elapsed_seconds = elapsed / 1000000000
--- 计算生成的令牌数量,使用秒为单位直接计算
-local tokens_added = elapsed_seconds * rate
--- 确保不超过容量
-local new_tokens = math.min(capacity, tokens + tokens_added)
-tokens = new_tokens
-end
-
--- 检查是否有足够的令牌
-local allowed = 0
-local wait_time = 0
-local tokens_to_save -- 用于存储最终要保存回 Redis 的令牌数
-
--- 注意：这里的 'tokens' 变量是在脚本前面计算好的、包含了新补充令牌的当前桶内令牌数
-if tokens >= tokens_requested then
-  -- 有足够的令牌,允许请求
-  allowed = 1
-  wait_time = 0
-  tokens_to_save = tokens - tokens_requested -- 扣除请求的令牌
-else
-  -- 令牌不足,计算等待时间
-  allowed = 0
-  local needed_tokens = tokens_requested - tokens -- 计算还差多少令牌
-  wait_time = math.ceil(needed_tokens * 1000000000 / rate) -- 计算需要等待多久才能补足差额
-  -- 保存反映“欠账”的令牌数（当前令牌减去请求的令牌，结果为负数或零）
-  -- 这表示为了满足这个被延迟的请求，我们已经预支了未来的令牌
-  tokens_to_save = tokens - tokens_requested
-end
-
--- 更新桶状态，保存计算后的令牌数和当前时间戳
-redis.call('hmset', key, 'tokens', tokens_to_save, 'last_update', now)
-redis.call('expire', key, ttl) -- 设置TTL
-
-return {allowed, wait_time}
-`)
+	--[[
+	令牌桶算法的Redis实现（优化版）
+	功能：
+	1. 分布式令牌桶限流
+	2. 动态速率调整
+	3. 最大等待时间限制
+	4. 支持自动过期清理
+	]]--
+	
+	--------------------------
+	-- 常量与参数解析
+	--------------------------
+	local NANOSECONDS_PER_SECOND = 1000000000
+	local MAX_WAIT_SECONDS = 10  -- 硬限制：最大等待10秒
+	
+	-- 输入参数
+	local key = KEYS[1]                     -- Redis键（令牌桶ID）
+	local requested = tonumber(ARGV[1])     -- 请求的令牌数
+	local rate = tonumber(ARGV[2])          -- 每秒生成的令牌数
+	local capacity = tonumber(ARGV[3])      -- 桶的容量（最大令牌数）
+	local now = tonumber(ARGV[4])           -- 当前时间（纳秒）
+	local ttl = tonumber(ARGV[5])           -- 键的TTL（秒）
+	
+	-- 计算最大等待时间（取10秒或填满空桶所需时间的较小值）
+	local max_wait_seconds = math.min(MAX_WAIT_SECONDS, capacity / rate)
+	local max_wait_ns = max_wait_seconds * NANOSECONDS_PER_SECOND
+	
+	--------------------------
+	-- 函数定义
+	--------------------------
+	
+	-- 初始化一个新令牌桶
+	local function create_new_bucket()
+	  return {
+	    tokens = capacity,      -- 新桶默认填满令牌
+	    last_update = now,      -- 更新时间为当前时间
+	    last_rate = rate        -- 记录当前速率
+	  }
+	end
+	
+	-- 加载现有令牌桶状态
+	local function load_bucket()
+	  local bucket = redis.call('hmget', key, 'tokens', 'last_update', 'last_rate')
+	  
+	  -- 桶不存在，创建新桶
+	  if bucket[1] == false then
+	    return create_new_bucket()
+	  end
+	  
+	  -- 解析桶状态
+	  return {
+	    tokens = tonumber(bucket[1]),
+	    last_update = tonumber(bucket[2]),
+	    last_rate = bucket[3] ~= false and tonumber(bucket[3]) or 0
+	  }
+	end
+	
+	-- 处理速率变化
+	local function handle_rate_change(bucket)
+	  local previous_rate = bucket.last_rate
+	  
+	  -- 检测有效的速率变化（>10%）
+	  local significant_change = previous_rate > 0 and rate > 0 and
+	                            math.abs(rate - previous_rate) / previous_rate > 0.1
+	                            
+	  -- 当速率显著降低时，调整令牌数以避免过长等待时间
+	  if significant_change and rate < previous_rate and bucket.tokens < 0 then
+	    -- 负债重置策略：限制最大负债为一秒产生的令牌数
+	    bucket.tokens = math.max(bucket.tokens, -rate)
+	  end
+	  
+	  return bucket
+	end
+	
+	-- 更新令牌数（基于时间流逝）
+	local function refill_tokens(bucket)
+	  -- 计算经过的时间
+	  local elapsed_ns = math.max(0, now - bucket.last_update)
+	  local elapsed_seconds = elapsed_ns / NANOSECONDS_PER_SECOND
+	  
+	  -- 计算新增令牌
+	  local new_tokens = elapsed_seconds * rate
+	  
+	  -- 更新桶状态
+	  bucket.tokens = math.min(capacity, bucket.tokens + new_tokens)
+	  bucket.last_update = now
+	  bucket.last_rate = rate
+	  
+	  return bucket
+	end
+	
+	-- 消费请求的令牌
+	local function consume_tokens(bucket, tokens_needed)
+	  -- 足够的令牌 - 立即通过
+	  if bucket.tokens >= tokens_needed then
+	    local result = {
+	      allowed = 1,
+	      wait_time = 0,
+	      remaining_tokens = bucket.tokens - tokens_needed
+	    }
+	    return result
+	  end
+	  
+	  -- 令牌不足 - 计算等待时间
+	  local deficit = tokens_needed - bucket.tokens
+	  local raw_wait_time = math.ceil(deficit * NANOSECONDS_PER_SECOND / rate)
+	  local wait_time = math.min(raw_wait_time, max_wait_ns)
+	  
+	  -- 计算等待后状态
+	  local actual_wait_seconds = wait_time / NANOSECONDS_PER_SECOND
+	  local tokens_generated = actual_wait_seconds * rate
+	  
+	  -- 计算剩余令牌
+	  local remaining_tokens
+	  if wait_time >= max_wait_ns then
+	    -- 达到最大等待时间，调整令牌计算
+	    remaining_tokens = bucket.tokens + tokens_generated - tokens_needed
+	  else
+	    -- 正常情况，允许负债
+	    remaining_tokens = bucket.tokens - tokens_needed
+	  end
+	  
+	  local result = {
+	    allowed = 0,
+	    wait_time = wait_time,
+	    remaining_tokens = remaining_tokens
+	  }
+	  return result
+	end
+	
+	-- 保存桶状态到Redis
+	local function save_bucket(tokens)
+	  redis.call('hmset', key, 'tokens', tokens, 'last_update', now, 'last_rate', rate)
+	  redis.call('expire', key, ttl)
+	end
+	
+	--------------------------
+	-- 主执行逻辑
+	--------------------------
+	
+	-- 1. 加载桶状态
+	local bucket = load_bucket()
+	
+	-- 2. 处理速率变化
+	bucket = handle_rate_change(bucket)
+	
+	-- 3. 添加新生成的令牌
+	bucket = refill_tokens(bucket)
+	
+	-- 4. 处理请求
+	local result = consume_tokens(bucket, requested)
+	
+	-- 5. 保存更新后的状态
+	save_bucket(result.remaining_tokens)
+	
+	-- 6. 返回结果
+	return {result.allowed, result.wait_time}
+	`)
 
 	// 转换速率限制（tokens/second）为浮点数
 	ratePerSecond := float64(rl.limit)
@@ -374,11 +473,11 @@ return {allowed, wait_time}
 		"ttl_seconds", int(rl.backend.keyTTL.Seconds()))
 	result, err := script.Run(ctx, rl.backend.client,
 		[]string{rl.backend.getRedisKey(rl.tokenID)},
-		n, // 请求的令牌数
-		ratePerSecond,
-		rl.burst,
-		time.Now().UnixNano(),
-		int(rl.backend.keyTTL.Seconds()),
+		n,                                // 请求的令牌数
+		ratePerSecond,                    // 每秒产生的令牌数
+		rl.burst,                         // 桶容量
+		time.Now().UnixNano(),            // 当前时间（纳秒）
+		int(rl.backend.keyTTL.Seconds()), // 键TTL
 	).Result()
 
 	// 添加日志记录脚本执行后的原始结果
