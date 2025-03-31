@@ -19,8 +19,20 @@ jobs:
     - name: Upload artifact to 0x0.st
       id: upload_step
       run: |
-        # 假设编译后的二进制文件名为 gopp，位于根目录
-        # 如果文件名或路径不同，请修改下面的命令
-        UPLOAD_URL=$(curl -F'file=@gopp' https://0x0.st)
+        # 压缩二进制文件
+        echo "Compressing gopp binary..."
+        gzip -c ./gopp > gopp.gz
+        
+        # 上传压缩后的文件到 0x0.st 并捕获 URL
+        echo "Uploading gopp.gz to 0x0.st..."
+        UPLOAD_URL=$(curl -F "file=@gopp.gz" https://0x0.st/)
+        
+        # 输出上传 URL 到日志
         echo "Uploaded to: $UPLOAD_URL"
+        
+        # 设置步骤输出变量
         echo "artifact_url=$UPLOAD_URL" >> $GITHUB_OUTPUT
+        
+        # 添加到工作流摘要
+        echo "### 构建产物下载链接 :rocket:" >> $GITHUB_STEP_SUMMARY
+        echo "构建产物下载链接: $UPLOAD_URL" >> $GITHUB_STEP_SUMMARY
