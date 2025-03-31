@@ -1,12 +1,25 @@
-# Gopp HTTP Proxy Server Configuration
-
-listen_addr: ":8082"          # Address and port to listen on (e.g., ":8080", "127.0.0.1:8082")
-fpm_network: "tcp"            # Network type for PHP-FPM connection ("tcp" or "unix")
-fpm_address: "127.0.0.1:9000" # Address for PHP-FPM (e.g., "127.0.0.1:9000" or "/run/php/php8.1-fpm.sock")
-doc_root: "/srv/gopp"         # Document root for PHP files
-accel_root: "/srv/protected_files"       # Root directory for X-Accel-Redirect files
-read_timeout_seconds: 15      # HTTP server read timeout in seconds
-write_timeout_seconds: 60     # HTTP server write timeout in seconds
-idle_timeout_seconds: 120     # HTTP server idle timeout in seconds
-# by adjusting the TCP segment size. This is less precise than pure userspace rate limiting but more efficient.
+# Gopp HTTP代理服务器配置
+listen_addr: ":8082"          # 监听的地址和端口（例如，":8080"，"127.0.0.1:8082"）
+fpm_network: "tcp"            # PHP - FPM连接的网络类型（"tcp" 或 "unix"）
+fpm_address: "127.0.0.1:9000" # PHP - FPM的地址（例如，"127.0.0.1:9000" 或 "/run/php/php8.1 - fpm.sock"）
+doc_root: "/srv/gopp"         # PHP文件的文档根目录
+accel_root: "/srv/protected_files"       # X - Accel - Redirect文件的根目录
+read_timeout_seconds: 15      # HTTP服务器读取超时时间（秒）
+write_timeout_seconds: 0     # HTTP服务器写入超时时间（秒）
+idle_timeout_seconds: 0     # HTTP服务器空闲超时时间（秒）
 main_php_file: index.php
+trusted_proxies:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+
+# Redis后端配置（用于令牌桶限速器）
+redis_backend: true          # 是否使用Redis后端存储令牌桶状态，true = 使用Redis，false = 使用内存
+redis_addr: "localhost:6379"  # Redis服务器地址
+redis_password: ""            # Redis密码（如果有）
+redis_db: 0                   # Redis数据库索引
+redis_key_prefix: "gopp:rate:" # Redis键前缀
+redis_key_ttl: 30           # Redis键TTL（过期时间，秒）
+
+# 新增日志级别配置
+log_level: debug               # 日志级别，可取值为debug, info, warn, error等

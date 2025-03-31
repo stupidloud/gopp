@@ -4,7 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog" // 替换 log
+	"math"
 	"mime"
 	"net"
 	"net/http"
@@ -18,13 +19,62 @@ import (
 	"golang.org/x/time/rate" // 保留rate导入用于RateLimiter类型
 )
 
-// createPHPHandler 创建处理PHP请求的HTTP处理器
-// 接受mainPHPFile和manager作为参数，而不是依赖全局变量
-func createPHPHandler(connFactory gofast.ConnFactory, docRoot, accelRoot, mainPHPFile string, manager *TokenBucketManager) http.Handler {
-	// 创建客户端工厂
-	clientFactory := gofast.SimpleClientFactory(connFactory)
+// GetRealIP 从请求中获取真实的客户端IP地址
+// 如果请求来自可信代理，会检查X-Forwarded-For头
+func GetRealIP(r *http.Request, trustedProxies []string) string {
+	// 首先获取直接连接的IP地址
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		// 如果无法解析RemoteAddr，则直接返回原始值
+		return r.RemoteAddr
+	}
 
-	// 使用传入的令牌桶管理器
+	// 检查是否来自可信代理
+	isTrusted := false
+	for _, proxy := range trustedProxies {
+		if proxy == ip {
+			isTrusted = true
+			break
+		}
+		// 支持CIDR格式
+		if strings.Contains(proxy, "/") {
+			_, ipnet, cidrErr := net.ParseCIDR(proxy)
+			if cidrErr == nil && ipnet.Contains(net.ParseIP(ip)) {
+				isTrusted = true
+				break
+			}
+		}
+	}
+
+	// 如果不是来自可信代理，直接返回连接IP
+	if !isTrusted {
+		return ip
+	}
+
+	// 处理X-Forwarded-For头
+	// 格式通常是: client, proxy1, proxy2, ...
+	forwardedFor := r.Header.Get("X-Forwarded-For")
+	if forwardedFor != "" {
+		// 拆分并获取最左边的IP（最原始的客户端）
+		ips := strings.Split(forwardedFor, ",")
+		clientIP := strings.TrimSpace(ips[0])
+		if clientIP != "" {
+			return clientIP
+		}
+	}
+
+	// 如果X-Forwarded-For为空，尝试其他常见的代理头
+	if clientIP := r.Header.Get("X-Real-IP"); clientIP != "" {
+		return clientIP
+	}
+
+	// 所有尝试都失败，返回直接连接的IP
+	return ip
+}
+
+// createPHPHandler 创建处理PHP请求的HTTP处理器
+func createPHPHandler(connFactory gofast.ConnFactory, docRoot, accelRoot, mainPHPFile string, manager *TokenBucketManager, trustedProxies []string, logger *slog.Logger) http.Handler { // 添加 logger 参数
+	clientFactory := gofast.SimpleClientFactory(connFactory)
 
 	// 创建会话处理器，总是将请求路由到docRoot/mainPHPFile
 	alwaysIndexSessionHandler := gofast.Chain(
@@ -41,7 +91,22 @@ func createPHPHandler(connFactory gofast.ConnFactory, docRoot, accelRoot, mainPH
 				req.Params["SCRIPT_NAME"] = "/" + mainPHPFile
 				// REQUEST_URI应保持原始请求URI(例如/123.zip)
 				// gofast.BasicParamsMap会处理这个以及QUERY_STRING, REQUEST_METHOD等
-				log.Printf("路由请求 %s 到 SCRIPT_FILENAME: %s", req.Params["REQUEST_URI"], req.Params["SCRIPT_FILENAME"])
+				logger.Debug("路由请求到 PHP", "request_uri", req.Params["REQUEST_URI"], "script_filename", req.Params["SCRIPT_FILENAME"]) // 使用 Debug 级别
+
+				// 获取真实的客户端IP
+				realIP := GetRealIP(req.Raw, trustedProxies)
+				// 设置REMOTE_ADDR为真实客户端IP
+				req.Params["REMOTE_ADDR"] = realIP
+				// 保存原始X-Forwarded-For头信息（如果存在）
+				if forwardedFor := req.Raw.Header.Get("X-Forwarded-For"); forwardedFor != "" {
+					req.Params["HTTP_X_FORWARDED_FOR"] = forwardedFor
+				}
+				// 传递其他代理相关头信息
+				if realIP := req.Raw.Header.Get("X-Real-IP"); realIP != "" {
+					req.Params["HTTP_X_REAL_IP"] = realIP
+				}
+
+				logger.Debug("处理请求", "client_ip", realIP, "request_uri", req.Params["REQUEST_URI"]) // 使用 Debug 级别
 				return inner(client, req)
 			}
 		},
@@ -66,60 +131,51 @@ func createPHPHandler(connFactory gofast.ConnFactory, docRoot, accelRoot, mainPH
 
 		// 如果需要X-Accel-Redirect，则处理
 		if rw.accelPath != "" {
-			log.Printf("处理 X-Accel-Redirect: %s 对应请求 %s", rw.accelPath, r.URL.Path)
+			logger.Info("处理 X-Accel-Redirect", "accel_path", rw.accelPath, "request_uri", r.URL.Path)
 
 			targetPath := filepath.Join(accelRoot, rw.accelPath)
 			cleanAccelRoot, _ := filepath.Abs(accelRoot)
 			cleanTargetPath, _ := filepath.Abs(targetPath)
 
 			if !filepath.HasPrefix(cleanTargetPath, cleanAccelRoot) {
-				log.Printf("安全警告: 阻止X-Accel-Redirect路径遍历尝试: %s", rw.accelPath)
+				logger.Warn("阻止X-Accel-Redirect路径遍历尝试", "accel_path", rw.accelPath)
 				http.Error(w, "Forbidden", http.StatusForbidden)
 				return
 			}
 
-			// Check if file exists
+			// 检查文件是否存在
 			fileInfo, err := os.Stat(cleanTargetPath)
 			if os.IsNotExist(err) {
-				log.Printf("X-Accel-Redirect文件未找到: %s", cleanTargetPath)
+				logger.Warn("X-Accel-Redirect文件未找到", "path", cleanTargetPath)
 				http.NotFound(w, r)
 				return
 			} else if err != nil {
-				log.Printf("访问X-Accel-Redirect文件 %s 错误: %v", cleanTargetPath, err)
+				logger.Error("访问X-Accel-Redirect文件错误", "path", cleanTargetPath, "error", err)
 				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 				return
 			}
 
-			// Add any headers from PHP that we want to pass through
-			// (like Content-Disposition for downloads)
-			// Pass the original ResponseWriter's Header() to copyHeaders
-			copyHeaders(w.Header(), rw.Header()) // Copy PHP headers to original writer's headers
+			// (例如，Content-Disposition 用于下载)
+			// 将原始 ResponseWriter 的 Header() 传递给 copyHeaders
+			//copyHeaders(w.Header(), rw.Header()) //不需要此操作，原因不明???
 
 			// 获取或创建共享的 RateLimiter (使用传入的 manager)
 			var sharedLimiter *RateLimiter
 			// 使用从 header 中获取的 accelLimitBytes
 			if rw.accelTokenID != "" && rw.accelLimitBytes > 0 { // 仅当同时提供了有效的 Token ID 和 Limit 时才创建/获取限速器
-				manager.mu.Lock()
-				limiter, exists := manager.limiters[rw.accelTokenID]
-				if !exists {
-					// 如果令牌桶不存在，则创建一个新的
-					limit := rate.Limit(rw.accelLimitBytes) // bytes/s
-					burst := int(limit)                     // Adjusted burst size according to new rate unit
-					limiter = NewRateLimiter(limit, burst)
-					manager.limiters[rw.accelTokenID] = limiter
-					log.Printf("为令牌ID '%s'创建新的共享速率限制器: %d 字节/秒", rw.accelTokenID, rw.accelLimitBytes)
-				} else {
-					// 注意：这里没有更新现有令牌桶的速率。如果需要动态更新速率，需要额外逻辑。
-					log.Printf("使用令牌ID '%s'的现有共享速率限制器", rw.accelTokenID)
-				}
-				sharedLimiter = limiter // 使用找到或创建的限速器
-				manager.mu.Unlock()
+				// 使用GetLimiter函数获取或创建令牌桶
+				limiter := manager.GetLimiter(rw.accelTokenID, rate.Limit(rw.accelLimitBytes), int(float64(rw.accelLimitBytes)*1.5))
+				logger.Debug("获取或创建速率限制器", "token_id", rw.accelTokenID, "limit_bytes", rw.accelLimitBytes)
+				limiter.SetLimit(rate.Limit(rw.accelLimitBytes))
+				limiter.SetBurst(int(float64(rw.accelLimitBytes) * 1.5))
+				logger.Debug("更新速率限制器设置", "token_id", rw.accelTokenID, "limit_burst", int(float64(rw.accelLimitBytes)*1.5))
+
+				sharedLimiter = limiter
 			}
 			// 如果没有提供 Token ID 或有效的 Limit，sharedLimiter 将保持为 nil，表示不限速
 
 			// 调用统一的文件发送函数，传递获取到的限速器 (可能为 nil)
-			// Directly pass rw (*responseInterceptor) as required by the function signature
-			sendFileWithSendfile(r.Context(), rw, r, cleanTargetPath, fileInfo, sharedLimiter)
+			sendFileWithSendfile(r.Context(), rw, r, cleanTargetPath, fileInfo, sharedLimiter, logger) // 传递 logger
 		}
 		// 否则：正常响应已由responseInterceptor写入原始ResponseWriter处理
 	})
@@ -158,9 +214,9 @@ func (rw *responseInterceptor) WriteHeader(code int) {
 			limit, err := strconv.Atoi(limitStr)
 			if err == nil && limit > 0 {
 				rw.accelLimitBytes = limit // 存储有效的速率限制(字节)
-				log.Printf("收到X-Accel-Limit-Rate: %d 字节/秒 对应令牌ID: %s", limit, tokenID)
+				logger.Debug("收到 X-Accel-Limit-Rate", "limit_bytes", limit, "token_id", tokenID)
 			} else {
-				log.Printf("警告: 收到无效的X-Accel-Limit-Rate值 '%s'。忽略令牌ID %s 的速率限制", limitStr, tokenID)
+				logger.Warn("收到无效的 X-Accel-Limit-Rate 值，忽略速率限制", "value", limitStr, "token_id", tokenID)
 			}
 			rw.Header().Del("X-Accel-Limit-Rate") // 从最终响应中移除
 		}
@@ -195,7 +251,7 @@ func (rw *responseInterceptor) Flush() {
 
 // sendFileWithSendfile 使用sendfile系统调用发送文件，并应用传入的令牌桶限速器
 func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.Request, filePath string,
-	fileInfo os.FileInfo, limiter *RateLimiter) {
+	fileInfo os.FileInfo, limiter *RateLimiter, logger *slog.Logger) { // 添加 logger 参数
 
 	// 设置基本响应头
 	contentType := mime.TypeByExtension(filepath.Ext(filePath))
@@ -205,6 +261,14 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 	originalWriter := w.ResponseWriter
 	originalWriter.Header().Set("Content-Type", contentType)
 	originalWriter.Header().Set("Accept-Ranges", "bytes")
+	// 设置nocache头信息
+	originalWriter.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	originalWriter.Header().Set("Pragma", "no-cache")
+	originalWriter.Header().Set("Expires", "0")
+
+	// 计算并设置etag
+	etag := fmt.Sprintf("%d-%d", fileInfo.ModTime().UnixNano(), fileInfo.Size())
+	originalWriter.Header().Set("ETag", etag)
 
 	// 处理 Range 请求
 	var startRange int64 = 0
@@ -236,13 +300,13 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 	// 为 TCP 连接准备 hijack (在Linux上，这应该总是可行的)
 	hijacker, ok := originalWriter.(http.Hijacker)
 	if !ok {
-		log.Printf("错误: ResponseWriter不支持Hijacker接口")
+		logger.Error("ResponseWriter不支持Hijacker接口")
 		http.Error(originalWriter, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 	conn, bufrw, err := hijacker.Hijack()
 	if err != nil {
-		log.Printf("Error: Failed to hijack connection: %v", err)
+		logger.Error("无法劫持连接", "error", err)
 		// 无法发送 HTTP 错误，因为连接可能已损坏
 		return
 	}
@@ -251,7 +315,7 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 	// 转换为 TCP 连接 (在Linux上，这应该总是成功的)
 	tcpConn, ok := conn.(*net.TCPConn)
 	if !ok {
-		log.Printf("错误: 劫持的连接不是TCP连接")
+		logger.Error("劫持的连接不是TCP连接")
 		// Try to write error to buffer, might fail
 		bufrw.WriteString("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nInternal Server Error: Not a TCP connection")
 		bufrw.Flush()
@@ -261,7 +325,7 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 	// 打开文件
 	file, err := os.Open(filePath)
 	if err != nil {
-		log.Printf("打开文件 %s 错误: %v", filePath, err)
+		logger.Error("打开文件错误", "path", filePath, "error", err)
 		// 已经 hijack 了连接，需要手动写入响应
 		bufrw.WriteString("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nError opening file")
 		bufrw.Flush()
@@ -273,7 +337,7 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 	if isPartialRequest {
 		_, err = file.Seek(startRange, io.SeekStart)
 		if err != nil {
-			log.Printf("定位到范围起始 %d 错误: %v", startRange, err)
+			logger.Error("定位文件范围起始错误", "offset", startRange, "error", err)
 			bufrw.WriteString("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nError seeking file")
 			bufrw.Flush()
 			return
@@ -283,14 +347,12 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 	// 获取 TCP 连接的文件描述符
 	tcpFile, err := tcpConn.File()
 	if err != nil {
-		log.Printf("获取TCP文件描述符错误: %v", err)
+		logger.Error("获取TCP文件描述符错误", "error", err)
 		bufrw.WriteString("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nError getting TCP descriptor")
 		bufrw.Flush()
 		return
 	}
 	defer tcpFile.Close()
-
-	// RateLimiter(limiter)现在作为参数传入
 
 	// 准备 HTTP 响应头
 	var respStatus string
@@ -313,7 +375,7 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 	// 从原始ResponseWriter写入头信息(包括Content-Type、Accept-Ranges、Content-Range(如果设置)和PHP头)
 	err = originalWriter.Header().Write(bufrw)
 	if err != nil {
-		log.Printf("写入头信息到劫持连接错误: %v", err)
+		logger.Error("写入头信息到劫持连接错误", "error", err)
 		return // Cannot proceed
 	}
 
@@ -321,12 +383,11 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 	bufrw.WriteString("\r\n")
 	bufrw.Flush()
 
-	logMsg := fmt.Sprintf("通过X-Accel-Redirect使用sendfile服务文件: %s", filePath)
-
+	logAttrs := []any{"path", filePath}
 	if isPartialRequest {
-		logMsg += fmt.Sprintf(" (range %d-%d)", startRange, endRange)
+		logAttrs = append(logAttrs, "range_start", startRange, "range_end", endRange)
 	}
-	log.Print(logMsg)
+	logger.Info("通过X-Accel-Redirect使用sendfile服务文件", logAttrs...)
 
 	// 使用 sendfile 发送文件
 	srcFd := int(file.Fd())
@@ -338,7 +399,7 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 	// 分块发送文件，每块不超过 1MB，并应用传入的限速器（如果存在）
 	for sentBytes < bytesToSend {
 		// 确定本次发送的块大小
-		chunkSize := int(min(bytesToSend-sentBytes, int64(1<<19))) // 512k 块或剩余全部
+		chunkSize := int(math.Min(float64(bytesToSend-sentBytes), float64(1<<18))) // 256k 块或剩余全部
 
 		// 如果传入了限速器 (limiter != nil)，则等待令牌
 		if limiter != nil {
@@ -347,7 +408,7 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 			waitErr := limiter.Wait(ctx, chunkSize) // 使用传入的 limiter
 			if waitErr != nil {
 				// 如果上下文被取消（例如，客户端断开连接）或发生其他错误，则停止发送
-				log.Printf("速率限制器等待错误: %v。停止传输。", waitErr)
+				logger.Warn("速率限制器等待错误，停止传输", "error", waitErr)
 				break
 			}
 		}
@@ -357,41 +418,22 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 		if sendErr != nil {
 			// 处理 sendfile 错误（例如，连接断开）
 			if se, ok := sendErr.(syscall.Errno); ok && se == syscall.EPIPE {
-				log.Printf("Sendfile错误: 管道破裂(客户端可能已断开连接)")
+				logger.Warn("Sendfile错误: 管道破裂(客户端可能已断开连接)")
 			} else {
-				log.Printf("sendfile过程中错误: %v", sendErr)
+				logger.Error("sendfile过程中错误", "error", sendErr)
 			}
 			break // 发生错误，停止传输
 		}
 		if n == 0 {
 			// sendfile 返回 0 通常意味着没有更多数据可发送或连接已关闭
-			log.Print("sendfile返回0字节，假设EOF或连接已关闭")
+			logger.Info("sendfile返回0字节，假设EOF或连接已关闭")
 			break // 假设传输完成或中断
 		}
 		// 更新已发送的字节数
 		sentBytes += int64(n)
 	}
 
-	log.Printf("完成sendfile传输 %s: 已发送 %d 字节", filePath, sentBytes)
-}
-
-// clamp 限制一个整数在指定范围内
-func clamp(value, min, max int) int {
-	if value < min {
-		return min
-	}
-	if value > max {
-		return max
-	}
-	return value
-}
-
-// min 返回两个 int64 中较小的一个
-func min(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
+	logger.Info("完成sendfile传输", "path", filePath, "sent_bytes", sentBytes)
 }
 
 // copyHeaders从src复制头信息到dst，排除hop-by-hop和X-Accel头

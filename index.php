@@ -20,8 +20,10 @@ if (strpos($filename, '..') !== false || strpos($filename, '/') !== false) {
 header('X-Accel-Redirect: ' . $filename);
 
 // 你仍然可以设置 Token ID 和速率限制
-header('X-Accel-Token-Id: ' . '123456'); // 使用文件名生成一个简单的 Token ID
-header('X-Accel-Limit-Rate: 1048576'); // 1MB/s
+header('X-Accel-Token-Id: ' . '123455'); // 使用文件名生成一个简单的 Token ID
+header('X-Accel-Limit-Rate: 500'); // 1MB/s
+
+header('Custom-Header: 123456'); // 自定义头部
 
 // PHP 脚本本身不需要输出任何内容
 exit;
