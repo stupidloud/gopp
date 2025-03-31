@@ -1,0 +1,12 @@
+# Gopp HTTP Proxy Server Configuration
+
+listen_addr: ":8082"          # Address and port to listen on (e.g., ":8080", "127.0.0.1:8082")
+fpm_network: "tcp"            # Network type for PHP-FPM connection ("tcp" or "unix")
+fpm_address: "127.0.0.1:9000" # Address for PHP-FPM (e.g., "127.0.0.1:9000" or "/run/php/php8.1-fpm.sock")
+doc_root: "/srv/gopp"         # Document root for PHP files
+accel_root: "/srv/protected_files"       # Root directory for X-Accel-Redirect files
+read_timeout_seconds: 15      # HTTP server read timeout in seconds
+write_timeout_seconds: 60     # HTTP server write timeout in seconds
+idle_timeout_seconds: 120     # HTTP server idle timeout in seconds
+# by adjusting the TCP segment size. This is less precise than pure userspace rate limiting but more efficient.
+main_php_file: index.php
