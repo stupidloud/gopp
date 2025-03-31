@@ -1,0 +1,26 @@
+name: Manual Go Build
+on:
+  workflow_dispatch:
+    inputs:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_url: ${{ steps.upload_step.outputs.artifact_url }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.24.1'
+    - name: Build
+      run: CGO_ENABLED=0 go build -v -trimpath -ldflags="-s -w" -o gopp ./...
+    - name: Upload artifact to 0x0.st
+      id: upload_step
+      run: |
+        # 假设编译后的二进制文件名为 gopp，位于根目录
+        # 如果文件名或路径不同，请修改下面的命令
+        UPLOAD_URL=$(curl -F'file=@gopp' https://0x0.st)
+        echo "Uploaded to: $UPLOAD_URL"
+        echo "artifact_url=$UPLOAD_URL" >> $GITHUB_OUTPUT
