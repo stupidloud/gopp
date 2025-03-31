@@ -15,7 +15,7 @@ jobs:
       with:
         go-version: '1.24.1'
     - name: Build
-      run: CGO_ENABLED=0 go build -v -trimpath -ldflags="-s -w" -o gopp ./...
+      run: CGO_ENABLED=0 go build -v -trimpath -ldflags="-s -w" -o gopp .
     - name: Upload artifact to 0x0.st
       id: upload_step
       run: |
