@@ -14,15 +14,15 @@ type TokenBucketManager struct {
 	mu       sync.Mutex
 }
 
-// NewTokenBucketManager creates a new TokenBucketManager.
+// NewTokenBucketManager 创建一个新的TokenBucketManager
 func NewTokenBucketManager() *TokenBucketManager {
 	return &TokenBucketManager{
 		limiters: make(map[string]*RateLimiter),
 	}
 }
 
-// GetLimiter retrieves or creates a RateLimiter for a given token ID and rate.
-// Note: This basic version doesn't update existing limiter rates.
+// GetLimiter 获取或创建一个指定令牌ID和速率的RateLimiter
+// 注意: 此基础版本不会更新现有限速器的速率
 func (m *TokenBucketManager) GetLimiter(tokenID string, limit rate.Limit, burst int) *RateLimiter {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -31,49 +31,49 @@ func (m *TokenBucketManager) GetLimiter(tokenID string, limit rate.Limit, burst 
 	if !exists {
 		limiter = NewRateLimiter(limit, burst)
 		m.limiters[tokenID] = limiter
-		// Consider adding logging here if needed
+		// 如果需要可以考虑在此添加日志
 	}
 	return limiter
 }
 
-// RateLimiter is a wrapper around rate.Limiter that provides a Wait method.
+// RateLimiter 是rate.Limiter的包装器，提供了Wait方法
 type RateLimiter struct {
 	limiter *rate.Limiter
 }
 
-// NewRateLimiter creates a new RateLimiter with the given rate and burst.
+// NewRateLimiter 使用给定的速率和突发值创建一个新的RateLimiter
 func NewRateLimiter(r rate.Limit, b int) *RateLimiter {
 	return &RateLimiter{
 		limiter: rate.NewLimiter(r, b),
 	}
 }
 
-// Wait waits until a token is available or the context is cancelled.
+// Wait 等待直到令牌可用或上下文被取消
 func (rl *RateLimiter) Wait(ctx context.Context, n int) error {
 	return rl.limiter.WaitN(ctx, n)
 }
 
-// Limit returns the rate limit.
+// Limit 返回速率限制
 func (rl *RateLimiter) Limit() rate.Limit {
 	return rl.limiter.Limit()
 }
 
-// Burst returns the burst size.
+// Burst 返回突发值大小
 func (rl *RateLimiter) Burst() int {
 	return rl.limiter.Burst()
 }
 
-// SetLimit sets the rate limit.
+// SetLimit 设置速率限制
 func (rl *RateLimiter) SetLimit(newLimit rate.Limit) {
 	rl.limiter.SetLimit(newLimit)
 }
 
-// SetBurst sets the burst size.
+// SetBurst 设置突发值大小
 func (rl *RateLimiter) SetBurst(newBurst int) {
 	rl.limiter.SetBurst(newBurst)
 }
 
-// AllowN reports whether n events may happen at time now.
+// AllowN 报告n个事件是否可以在当前时间发生
 func (rl *RateLimiter) AllowN(now time.Time, n int) bool {
 	return rl.limiter.AllowN(now, n)
 }

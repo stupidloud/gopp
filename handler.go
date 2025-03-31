@@ -13,44 +13,43 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	// Removed time import as it's not directly used here anymore
 
 	"github.com/yookoala/gofast"
-	"golang.org/x/time/rate" // Keep rate import for RateLimiter type
+	"golang.org/x/time/rate" // 保留rate导入用于RateLimiter类型
 )
 
 // createPHPHandler 创建处理PHP请求的HTTP处理器
-// Accepts mainPHPFile and manager as arguments instead of relying on globals
+// 接受mainPHPFile和manager作为参数，而不是依赖全局变量
 func createPHPHandler(connFactory gofast.ConnFactory, docRoot, accelRoot, mainPHPFile string, manager *TokenBucketManager) http.Handler {
 	// 创建客户端工厂
 	clientFactory := gofast.SimpleClientFactory(connFactory)
 
-	// 使用传入的 manager
+	// 使用传入的令牌桶管理器
 
-	// 创建一个会话处理器，它总是将请求路由到 docRoot/mainPHPFile
+	// 创建会话处理器，总是将请求路由到docRoot/mainPHPFile
 	alwaysIndexSessionHandler := gofast.Chain(
 		gofast.BasicParamsMap,
 		gofast.MapHeader,
 		gofast.MapRemoteHost,
 		func(inner gofast.SessionHandler) gofast.SessionHandler {
 			return func(client gofast.Client, req *gofast.Request) (*gofast.ResponsePipe, error) {
-				// 设置必要的 FastCGI 参数
+				// 设置必要的FastCGI参数
 				req.Params["DOCUMENT_ROOT"] = docRoot
-				// 显式设置脚本为 docRoot 下从参数读取的 mainPHPFile
+				// 显式设置脚本为docRoot下从参数读取的mainPHPFile
 				req.Params["SCRIPT_FILENAME"] = filepath.Join(docRoot, mainPHPFile)
-				// SCRIPT_NAME 通常是相对于 DOCUMENT_ROOT 的路径
+				// SCRIPT_NAME通常是相对于DOCUMENT_ROOT的路径
 				req.Params["SCRIPT_NAME"] = "/" + mainPHPFile
-				// REQUEST_URI 应该保持原始请求 URI (例如 /123.zip)
-				// gofast.BasicParamsMap 会处理这个以及 QUERY_STRING, REQUEST_METHOD 等
-				log.Printf("Routing request %s to SCRIPT_FILENAME: %s", req.Params["REQUEST_URI"], req.Params["SCRIPT_FILENAME"])
+				// REQUEST_URI应保持原始请求URI(例如/123.zip)
+				// gofast.BasicParamsMap会处理这个以及QUERY_STRING, REQUEST_METHOD等
+				log.Printf("路由请求 %s 到 SCRIPT_FILENAME: %s", req.Params["REQUEST_URI"], req.Params["SCRIPT_FILENAME"])
 				return inner(client, req)
 			}
 		},
-	)(gofast.BasicSession) // BasicSession 处理实际的 FastCGI 通信
+	)(gofast.BasicSession) // BasicSession处理实际的FastCGI通信
 
 	// 创建主处理器，使用我们修改过的会话处理器
 	phpFSHandler := gofast.NewHandler(
-		alwaysIndexSessionHandler, // 使用总是指向 mainPHPFile 的处理器
+		alwaysIndexSessionHandler, // 使用总是指向mainPHPFile的处理器
 		clientFactory,
 	)
 
@@ -67,14 +66,14 @@ func createPHPHandler(connFactory gofast.ConnFactory, docRoot, accelRoot, mainPH
 
 		// 如果需要X-Accel-Redirect，则处理
 		if rw.accelPath != "" {
-			log.Printf("Handling X-Accel-Redirect: %s for %s", rw.accelPath, r.URL.Path)
+			log.Printf("处理 X-Accel-Redirect: %s 对应请求 %s", rw.accelPath, r.URL.Path)
 
 			targetPath := filepath.Join(accelRoot, rw.accelPath)
 			cleanAccelRoot, _ := filepath.Abs(accelRoot)
 			cleanTargetPath, _ := filepath.Abs(targetPath)
 
 			if !filepath.HasPrefix(cleanTargetPath, cleanAccelRoot) {
-				log.Printf("Security warning: X-Accel-Redirect path traversal attempt blocked: %s", rw.accelPath)
+				log.Printf("安全警告: 阻止X-Accel-Redirect路径遍历尝试: %s", rw.accelPath)
 				http.Error(w, "Forbidden", http.StatusForbidden)
 				return
 			}
@@ -82,11 +81,11 @@ func createPHPHandler(connFactory gofast.ConnFactory, docRoot, accelRoot, mainPH
 			// Check if file exists
 			fileInfo, err := os.Stat(cleanTargetPath)
 			if os.IsNotExist(err) {
-				log.Printf("X-Accel-Redirect file not found: %s", cleanTargetPath)
+				log.Printf("X-Accel-Redirect文件未找到: %s", cleanTargetPath)
 				http.NotFound(w, r)
 				return
 			} else if err != nil {
-				log.Printf("Error accessing X-Accel-Redirect file %s: %v", cleanTargetPath, err)
+				log.Printf("访问X-Accel-Redirect文件 %s 错误: %v", cleanTargetPath, err)
 				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 				return
 			}
@@ -108,10 +107,10 @@ func createPHPHandler(connFactory gofast.ConnFactory, docRoot, accelRoot, mainPH
 					burst := int(limit)                     // Adjusted burst size according to new rate unit
 					limiter = NewRateLimiter(limit, burst)
 					manager.limiters[rw.accelTokenID] = limiter
-					log.Printf("Created new shared rate limiter for token ID '%s': %d bytes/s", rw.accelTokenID, rw.accelLimitBytes)
+					log.Printf("为令牌ID '%s'创建新的共享速率限制器: %d 字节/秒", rw.accelTokenID, rw.accelLimitBytes)
 				} else {
 					// 注意：这里没有更新现有令牌桶的速率。如果需要动态更新速率，需要额外逻辑。
-					log.Printf("Using existing shared rate limiter for token ID '%s'", rw.accelTokenID)
+					log.Printf("使用令牌ID '%s'的现有共享速率限制器", rw.accelTokenID)
 				}
 				sharedLimiter = limiter // 使用找到或创建的限速器
 				manager.mu.Unlock()
@@ -122,7 +121,7 @@ func createPHPHandler(connFactory gofast.ConnFactory, docRoot, accelRoot, mainPH
 			// Directly pass rw (*responseInterceptor) as required by the function signature
 			sendFileWithSendfile(r.Context(), rw, r, cleanTargetPath, fileInfo, sharedLimiter)
 		}
-		// else: Normal response already handled by responseInterceptor writing to original ResponseWriter
+		// 否则：正常响应已由responseInterceptor写入原始ResponseWriter处理
 	})
 }
 
@@ -159,9 +158,9 @@ func (rw *responseInterceptor) WriteHeader(code int) {
 			limit, err := strconv.Atoi(limitStr)
 			if err == nil && limit > 0 {
 				rw.accelLimitBytes = limit // 存储有效的速率限制(字节)
-				log.Printf("Received X-Accel-Limit-Rate: %d bytes/s for Token ID: %s", limit, tokenID)
+				log.Printf("收到X-Accel-Limit-Rate: %d 字节/秒 对应令牌ID: %s", limit, tokenID)
 			} else {
-				log.Printf("Warning: Invalid X-Accel-Limit-Rate value '%s' received. Ignoring limit for Token ID: %s", limitStr, tokenID)
+				log.Printf("警告: 收到无效的X-Accel-Limit-Rate值 '%s'。忽略令牌ID %s 的速率限制", limitStr, tokenID)
 			}
 			rw.Header().Del("X-Accel-Limit-Rate") // 从最终响应中移除
 		}
@@ -178,11 +177,11 @@ func (rw *responseInterceptor) WriteHeader(code int) {
 // Write 拦截Write调用
 func (rw *responseInterceptor) Write(b []byte) (int, error) {
 	if rw.accelPath != "" {
-		// Discard body if X-Accel-Redirect is active
+		// 如果X-Accel-Redirect激活则丢弃响应体
 		return len(b), nil
 	}
 	if !rw.headersSent {
-		rw.WriteHeader(http.StatusOK) // Ensure headers are sent before body
+		rw.WriteHeader(http.StatusOK) // 确保在发送响应体前发送头信息
 	}
 	return rw.ResponseWriter.Write(b)
 }
@@ -237,7 +236,7 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 	// 为 TCP 连接准备 hijack (在Linux上，这应该总是可行的)
 	hijacker, ok := originalWriter.(http.Hijacker)
 	if !ok {
-		log.Printf("Error: ResponseWriter does not support Hijacker interface")
+		log.Printf("错误: ResponseWriter不支持Hijacker接口")
 		http.Error(originalWriter, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
@@ -252,7 +251,7 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 	// 转换为 TCP 连接 (在Linux上，这应该总是成功的)
 	tcpConn, ok := conn.(*net.TCPConn)
 	if !ok {
-		log.Printf("Error: Hijacked connection is not a TCP connection")
+		log.Printf("错误: 劫持的连接不是TCP连接")
 		// Try to write error to buffer, might fail
 		bufrw.WriteString("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nInternal Server Error: Not a TCP connection")
 		bufrw.Flush()
@@ -262,7 +261,7 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 	// 打开文件
 	file, err := os.Open(filePath)
 	if err != nil {
-		log.Printf("Error opening file %s: %v", filePath, err)
+		log.Printf("打开文件 %s 错误: %v", filePath, err)
 		// 已经 hijack 了连接，需要手动写入响应
 		bufrw.WriteString("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nError opening file")
 		bufrw.Flush()
@@ -274,7 +273,7 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 	if isPartialRequest {
 		_, err = file.Seek(startRange, io.SeekStart)
 		if err != nil {
-			log.Printf("Error seeking to range start %d: %v", startRange, err)
+			log.Printf("定位到范围起始 %d 错误: %v", startRange, err)
 			bufrw.WriteString("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nError seeking file")
 			bufrw.Flush()
 			return
@@ -284,14 +283,14 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 	// 获取 TCP 连接的文件描述符
 	tcpFile, err := tcpConn.File()
 	if err != nil {
-		log.Printf("Error getting TCP file descriptor: %v", err)
+		log.Printf("获取TCP文件描述符错误: %v", err)
 		bufrw.WriteString("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nError getting TCP descriptor")
 		bufrw.Flush()
 		return
 	}
 	defer tcpFile.Close()
 
-	// RateLimiter (limiter) is now passed as an argument.
+	// RateLimiter(limiter)现在作为参数传入
 
 	// 准备 HTTP 响应头
 	var respStatus string
@@ -299,30 +298,30 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 	if isPartialRequest {
 		respStatus = "HTTP/1.1 206 Partial Content\r\n"
 		contentLength = endRange - startRange + 1
-		// Content-Range header was already set on originalWriter
+		// Content-Range头信息已在originalWriter上设置
 	} else {
 		respStatus = "HTTP/1.1 200 OK\r\n"
 		contentLength = fileInfo.Size()
 	}
 
-	// Write status line
+	// 写入状态行
 	bufrw.WriteString(respStatus)
 
-	// Write calculated Content-Length
+	// 写入计算后的Content-Length
 	bufrw.WriteString(fmt.Sprintf("Content-Length: %d\r\n", contentLength))
 
-	// Write headers from the original ResponseWriter (includes Content-Type, Accept-Ranges, Content-Range if set, and PHP headers)
+	// 从原始ResponseWriter写入头信息(包括Content-Type、Accept-Ranges、Content-Range(如果设置)和PHP头)
 	err = originalWriter.Header().Write(bufrw)
 	if err != nil {
-		log.Printf("Error writing headers to hijacked connection: %v", err)
+		log.Printf("写入头信息到劫持连接错误: %v", err)
 		return // Cannot proceed
 	}
 
-	// End headers
+	// 结束头信息
 	bufrw.WriteString("\r\n")
 	bufrw.Flush()
 
-	logMsg := fmt.Sprintf("Serving file via X-Accel-Redirect with sendfile: %s", filePath)
+	logMsg := fmt.Sprintf("通过X-Accel-Redirect使用sendfile服务文件: %s", filePath)
 
 	if isPartialRequest {
 		logMsg += fmt.Sprintf(" (range %d-%d)", startRange, endRange)
@@ -348,7 +347,7 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 			waitErr := limiter.Wait(ctx, chunkSize) // 使用传入的 limiter
 			if waitErr != nil {
 				// 如果上下文被取消（例如，客户端断开连接）或发生其他错误，则停止发送
-				log.Printf("Rate limiter wait error: %v. Stopping transfer.", waitErr)
+				log.Printf("速率限制器等待错误: %v。停止传输。", waitErr)
 				break
 			}
 		}
@@ -358,22 +357,22 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 		if sendErr != nil {
 			// 处理 sendfile 错误（例如，连接断开）
 			if se, ok := sendErr.(syscall.Errno); ok && se == syscall.EPIPE {
-				log.Printf("Sendfile error: Broken pipe (client likely disconnected).")
+				log.Printf("Sendfile错误: 管道破裂(客户端可能已断开连接)")
 			} else {
-				log.Printf("Error during sendfile: %v", sendErr)
+				log.Printf("sendfile过程中错误: %v", sendErr)
 			}
 			break // 发生错误，停止传输
 		}
 		if n == 0 {
 			// sendfile 返回 0 通常意味着没有更多数据可发送或连接已关闭
-			log.Print("sendfile returned 0 bytes, assuming EOF or connection closed.")
+			log.Print("sendfile返回0字节，假设EOF或连接已关闭")
 			break // 假设传输完成或中断
 		}
 		// 更新已发送的字节数
 		sentBytes += int64(n)
 	}
 
-	log.Printf("Finished sendfile transfer for %s: %d bytes sent", filePath, sentBytes)
+	log.Printf("完成sendfile传输 %s: 已发送 %d 字节", filePath, sentBytes)
 }
 
 // clamp 限制一个整数在指定范围内
@@ -395,12 +394,12 @@ func min(a, b int64) int64 {
 	return b
 }
 
-// copyHeaders copies headers from src to dst, excluding hop-by-hop and X-Accel headers.
+// copyHeaders从src复制头信息到dst，排除hop-by-hop和X-Accel头
 func copyHeaders(dst, src http.Header) {
 	for k, vv := range src {
-		// Normalize header key for comparison
+		// 规范化header key以便比较
 		normalizedKey := http.CanonicalHeaderKey(k)
-		// Don't copy hop-by-hop headers or our specific X-Accel headers
+		// 不要复制hop-by-hop头或特定的X-Accel头
 		if normalizedKey == "Connection" ||
 			normalizedKey == "Keep-Alive" ||
 			normalizedKey == "Proxy-Authenticate" ||
@@ -414,9 +413,9 @@ func copyHeaders(dst, src http.Header) {
 			normalizedKey == "X-Accel-Token-Id" {
 			continue
 		}
-		// Add remaining headers
+		// 添加剩余的头信息
 		for _, v := range vv {
-			dst.Add(k, v) // Use Add to handle multiple values for the same header
+			dst.Add(k, v) // 使用Add处理同一header的多个值
 		}
 	}
 }
@@ -434,7 +433,7 @@ func parseRangeHeader(rangeHeader string, fileSize int64) ([]byteRange, error) {
 		return nil, fmt.Errorf("unsupported range unit")
 	}
 
-	// 移除 "bytes=" 前缀
+	// 移除"bytes="前缀
 	rangeSpec := strings.TrimPrefix(rangeHeader, "bytes=")
 
 	// 解析每个范围（以逗号分隔）
@@ -457,7 +456,7 @@ func parseRangeHeader(rangeHeader string, fileSize int64) ([]byteRange, error) {
 		var err error
 
 		if startStr == "" {
-			// Suffix range: -N (last N bytes)
+			// 后缀范围: -N (最后N字节)
 			if endStr == "" {
 				return nil, fmt.Errorf("invalid suffix range format: %s", r)
 			}
@@ -471,17 +470,17 @@ func parseRangeHeader(rangeHeader string, fileSize int64) ([]byteRange, error) {
 			startByte = fileSize - suffixLen
 			endByte = fileSize - 1
 		} else {
-			// Range with start: M-N or M-
+			// 带起始的范围: M-N 或 M-
 			startByte, err = strconv.ParseInt(startStr, 10, 64)
 			if err != nil {
 				return nil, fmt.Errorf("invalid range start: %s", startStr)
 			}
 
 			if endStr == "" {
-				// M-: from M to end
+				// M-: 从M到结尾
 				endByte = fileSize - 1
 			} else {
-				// M-N: from M to N (inclusive)
+				// M-N: 从M到N(包含)
 				endByte, err = strconv.ParseInt(endStr, 10, 64)
 				if err != nil {
 					return nil, fmt.Errorf("invalid range end: %s", endStr)
@@ -489,17 +488,17 @@ func parseRangeHeader(rangeHeader string, fileSize int64) ([]byteRange, error) {
 			}
 		}
 
-		// Validate the range start
+		// 验证范围起始
 		if startByte < 0 {
 			startByte = 0 // Treat negative start as 0
 		}
 
-		// Validate the range end and adjust if necessary
+		// 验证范围结束并在必要时调整
 		if endByte < startByte || endByte >= fileSize {
 			endByte = fileSize - 1
 		}
 
-		// Final check: If start is beyond the end after adjustments, or >= fileSize, it's unsatisfiable.
+		// 最终检查: 如果调整后起始超过结束或>=文件大小，则无法满足
 		if startByte > endByte || startByte >= fileSize {
 			continue // Skip this unsatisfiable range part
 		}
@@ -508,11 +507,11 @@ func parseRangeHeader(rangeHeader string, fileSize int64) ([]byteRange, error) {
 	}
 
 	if len(ranges) == 0 {
-		// This happens if all range parts were invalid/unsatisfiable
+		// 当所有范围部分都无效/无法满足时发生
 		return nil, fmt.Errorf("range not satisfiable")
 	}
 
-	// Note: This implementation doesn't handle overlapping/unsorted ranges or multipart responses.
-	// It processes the first valid range found if multiple are specified.
+	// 注意: 此实现不处理重叠/未排序的范围或多部分响应
+	// 如果指定了多个范围，它只处理第一个有效的范围
 	return ranges, nil
 }
