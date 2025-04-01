@@ -113,15 +113,13 @@ func main() {
 	// 创建处理器（来自 handler.go）
 	// 显式传递配置值和令牌桶管理器
 	phpHandler := createPHPHandler(
+		logger, // 将 logger 传递给 handler
 		connFactory,
 		config.DocRoot,
 		config.AccelRoot,
 		config.MainPHPFile,    // 从配置传递主PHP文件
 		tokenManager,          // 传递令牌管理器实例
 		config.TrustedProxies, // 传递可信代理列表
-		logger,                // 将 logger 传递给 handler
-		config.TryFiles,       // 传递 try_files 配置
-		config.ErrorPages,     // 传递错误页面配置
 	)
 
 	// 创建服务器
