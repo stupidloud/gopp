@@ -26,34 +26,35 @@ func GetRealIP(r *http.Request, trustedProxies []string) string {
 		return r.RemoteAddr // 如果无法解析RemoteAddr，则直接返回原始值
 	}
 
-	isTrusted := false
-	for _, proxy := range trustedProxies {
-		if proxy == ip {
-			isTrusted = true
-			break
-		}
-		// 支持CIDR格式
-		if strings.Contains(proxy, "/") {
-			_, ipnet, cidrErr := net.ParseCIDR(proxy)
-			if cidrErr == nil && ipnet.Contains(net.ParseIP(ip)) {
-				isTrusted = true
-				break
-			}
-		}
-	}
-
-	if !isTrusted {
-		return ip
-	}
-
-	// 处理X-Forwarded-For头
-	// 格式通常是: client, proxy1, proxy2, ...
 	forwardedFor := r.Header.Get("X-Forwarded-For")
 	if forwardedFor != "" {
 		ips := strings.Split(forwardedFor, ",")
-		clientIP := strings.TrimSpace(ips[0])
-		if clientIP != "" {
-			return clientIP
+		for i := 0; i < len(ips); i++ {
+			clientIP := strings.TrimSpace(ips[i])
+			if clientIP == "" {
+				continue
+			}
+
+			// 检查 clientIP 是否为可信代理
+			isTrustedProxy := false
+			for _, proxy := range trustedProxies {
+				if proxy == clientIP {
+					isTrustedProxy = true
+					break
+				}
+				// 支持CIDR格式
+				if strings.Contains(proxy, "/") {
+					_, ipnet, cidrErr := net.ParseCIDR(proxy)
+					if cidrErr == nil && ipnet.Contains(net.ParseIP(clientIP)) {
+						isTrustedProxy = true
+						break
+					}
+				}
+			}
+
+			if !isTrustedProxy {
+				return clientIP
+			}
 		}
 	}
 
@@ -74,6 +75,7 @@ func secureJoinPath(basePath, requestedPath string) (string, error) {
 	}
 
 	targetPath := filepath.Join(cleanBasePath, requestedPath)
+	targetPath = filepath.Clean(targetPath)
 
 	// 获取目标路径的绝对路径（这也有助于清理 ".." 等）
 	cleanTargetPath, err := filepath.Abs(targetPath)
@@ -405,7 +407,6 @@ func sendFileWithSendfile(logger *slog.Logger, ctx context.Context, w *responseI
 	}
 
 	bufrw.WriteString(respStatus)
-
 	bufrw.WriteString(fmt.Sprintf("Content-Length: %d\r\n", contentLength))
 
 	// 从原始ResponseWriter写入头信息(包括Content-Type、Accept-Ranges、Content-Range(如果设置)和PHP头)
