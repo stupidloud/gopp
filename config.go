@@ -7,7 +7,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// 用于存储配置值的Config结构体
 type Config struct {
 	ListenAddr          string   `yaml:"listen_addr"`
 	FPMNetwork          string   `yaml:"fpm_network"`
@@ -21,18 +20,16 @@ type Config struct {
 	TrustedProxies      []string `yaml:"trusted_proxies"`
 
 	// Redis配置
-	RedisBackend   bool   `yaml:"redis_backend"`    // 是否使用Redis后端
-	RedisAddr      string `yaml:"redis_addr"`       // Redis服务器地址
-	RedisPassword  string `yaml:"redis_password"`   // Redis密码
-	RedisDB        int    `yaml:"redis_db"`         // Redis数据库索引
-	RedisKeyPrefix string `yaml:"redis_key_prefix"` // Redis键前缀
-	RedisKeyTTL    int    `yaml:"redis_key_ttl"`    // Redis键TTL（秒）
+	RedisBackend   bool   `yaml:"redis_backend"`
+	RedisAddr      string `yaml:"redis_addr"`
+	RedisPassword  string `yaml:"redis_password"`
+	RedisDB        int    `yaml:"redis_db"`
+	RedisKeyPrefix string `yaml:"redis_key_prefix"`
+	RedisKeyTTL    int    `yaml:"redis_key_ttl"`
 
-	// 新增日志级别配置
 	LogLevel string `yaml:"log_level"`
 }
 
-// 默认配置值
 var defaultConfig = Config{
 	ListenAddr:          ":8082",
 	FPMNetwork:          "tcp",
@@ -50,11 +47,9 @@ var defaultConfig = Config{
 	RedisPassword:  "",
 	RedisDB:        0,
 	RedisKeyPrefix: "gopp:rate:",
-	RedisKeyTTL:    3600, // 1小时TTL
-
+	RedisKeyTTL:    3600,
 }
 
-// loadConfig从YAML文件加载配置
 func loadConfig(path string) (Config, error) {
 	config := defaultConfig
 	data, err := os.ReadFile(path)

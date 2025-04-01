@@ -35,7 +35,6 @@ func parseLogLevel(levelStr string) slog.Level {
 
 func main() {
 	var err error
-	// 使用 config.go 中的函数加载配置
 	config, err = loadConfig("config.yaml")
 	if err != nil {
 		// loadConfig 现在在文件未找到时返回默认配置，
@@ -57,7 +56,6 @@ func main() {
 	logger.Info("日志系统初始化完成", "level", logLevel.String())
 	// --- 日志初始化完成 ---
 
-	// 将超时时间转换为 time.Duration
 	readTimeout := time.Duration(config.ReadTimeoutSeconds) * time.Second
 	writeTimeout := time.Duration(config.WriteTimeoutSeconds) * time.Second
 	idleTimeout := time.Duration(config.IdleTimeoutSeconds) * time.Second
@@ -68,33 +66,31 @@ func main() {
 	logger.Info("X-Accel 根目录", "path", config.AccelRoot)
 	logger.Info("主 PHP 文件", "file", config.MainPHPFile) // 记录正在使用的主 PHP 文件
 
-	// 创建连接工厂
 	connFactory := gofast.SimpleConnFactory(config.FPMNetwork, config.FPMAddress)
 
 	// --- 创建速率限制后端 ---
-	var backend RateLimiterBackend // 声明接口类型变量
+	var backend RateLimiterBackend
 	var backendErr error
 
 	if config.RedisBackend {
 		logger.Info("配置使用 Redis 后端进行速率限制")
 		// 尝试创建 Redis 后端，让它自己管理连接 (传入 nil client)
-		redisBackend, err := NewRedisBackend(&config, nil, logger) // 传递 logger
+		redisBackend, err := NewRedisBackend(&config, nil, logger)
 		if err != nil {
 			logger.Warn("无法初始化 Redis 后端，将回退到内存后端", "error", err)
-			backend = NewMemoryBackend(logger) // 回退到内存, 传递 logger
+			backend = NewMemoryBackend(logger) // 回退到内存
 			logger.Info("已回退到内存后端进行速率限制")
 		} else {
-			backend = redisBackend // 使用 Redis 后端
+			backend = redisBackend
 			logger.Info("成功初始化 Redis 后端")
 		}
 	} else {
 		logger.Info("配置使用内存后端进行速率限制")
-		backend = NewMemoryBackend(logger) // 使用内存后端, 传递 logger
+		backend = NewMemoryBackend(logger) // 使用内存后端
 	}
 	// --- 后端创建完毕 ---
 
-	// 创建令牌桶管理器，传入配置、创建好的后端和 logger
-	tokenManager, backendErr := NewTokenBucketManager(&config, backend, logger) // 传递 logger
+	tokenManager, backendErr := NewTokenBucketManager(&config, backend, logger)
 	if backendErr != nil {
 		// 如果 NewTokenBucketManager 出错（例如 backend 为 nil），则致命错误
 		logger.Error("无法创建令牌桶管理器", "error", backendErr)
@@ -110,19 +106,16 @@ func main() {
 		}
 	}()
 
-	// 创建处理器（来自 handler.go）
-	// 显式传递配置值和令牌桶管理器
 	phpHandler := createPHPHandler(
-		logger, // 将 logger 传递给 handler
+		logger,
 		connFactory,
 		config.DocRoot,
 		config.AccelRoot,
-		config.MainPHPFile,    // 从配置传递主PHP文件
-		tokenManager,          // 传递令牌管理器实例
-		config.TrustedProxies, // 传递可信代理列表
+		config.MainPHPFile,
+		tokenManager,
+		config.TrustedProxies,
 	)
 
-	// 创建服务器
 	server := &http.Server{
 		Addr:         config.ListenAddr,
 		Handler:      phpHandler,
@@ -131,7 +124,6 @@ func main() {
 		IdleTimeout:  idleTimeout,
 	}
 
-	// 启动服务器
 	logger.Info("服务器启动中...")
 	err = server.ListenAndServe()
 	if err != nil && err != http.ErrServerClosed {
