@@ -120,6 +120,8 @@ func main() {
 		tokenManager,          // 传递令牌管理器实例
 		config.TrustedProxies, // 传递可信代理列表
 		logger,                // 将 logger 传递给 handler
+		config.TryFiles,       // 传递 try_files 配置
+		config.ErrorPages,     // 传递错误页面配置
 	)
 
 	// 创建服务器

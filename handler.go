@@ -72,113 +72,220 @@ func GetRealIP(r *http.Request, trustedProxies []string) string {
 	return ip
 }
 
+// phpScriptRouterSessionHandler 是一个 gofast.SessionHandler 中间件，
+// 用于根据请求路径动态设置 SCRIPT_FILENAME 和 SCRIPT_NAME。
+func phpScriptRouterSessionHandler(docRoot string, mainPHPFile string, logger *slog.Logger) func(inner gofast.SessionHandler) gofast.SessionHandler {
+	return func(inner gofast.SessionHandler) gofast.SessionHandler {
+		return func(client gofast.Client, req *gofast.Request) (*gofast.ResponsePipe, error) {
+			requestPath := req.Raw.URL.Path
+			scriptToExecute := mainPHPFile // 默认执行 mainPHPFile
+			scriptName := "/" + mainPHPFile
+
+			if strings.HasSuffix(requestPath, ".php") {
+				// 如果请求的是 .php 文件，尝试执行该文件
+				requestedScriptPath := filepath.Join(docRoot, requestPath)
+				cleanRootPath, _ := filepath.Abs(docRoot)
+				cleanTargetPath, _ := filepath.Abs(requestedScriptPath)
+
+				// 安全检查：确保请求的脚本在 docRoot 内
+				if !strings.HasPrefix(cleanTargetPath, cleanRootPath) {
+					logger.Warn("阻止访问 docRoot 之外的 PHP 文件", "requested_path", requestPath, "resolved_path", requestedScriptPath)
+					return nil, fmt.Errorf("forbidden: access denied for path %s", requestPath)
+				}
+
+				// 检查请求的 .php 文件是否存在
+				if _, err := os.Stat(requestedScriptPath); err == nil {
+					// 文件存在，设置执行此脚本
+					scriptToExecute = requestPath // 使用相对路径
+					scriptName = requestPath
+				} else if os.IsNotExist(err) {
+					// 文件不存在，返回 404 错误
+					logger.Debug("请求的 .php 文件不存在", "requested_path", requestPath)
+					return nil, fmt.Errorf("not found: script %s not found", requestPath)
+				} else {
+					// 其他 Stat 错误
+					logger.Error("检查请求的 .php 文件时出错", "path", requestedScriptPath, "error", err)
+					return nil, fmt.Errorf("internal server error checking script %s", requestPath)
+				}
+			}
+			// else: 请求的不是 .php 文件，使用默认的 mainPHPFile
+
+			// 设置最终确定的脚本参数
+			req.Params["SCRIPT_FILENAME"] = filepath.Join(docRoot, scriptToExecute)
+			req.Params["SCRIPT_NAME"] = scriptName
+			logger.Debug("PHP 脚本路由", "script_filename", req.Params["SCRIPT_FILENAME"], "script_name", req.Params["SCRIPT_NAME"])
+
+			return inner(client, req)
+		}
+	}
+}
+
+// basicFastCGISetupSessionHandler 设置基本的 FastCGI 参数，如 DOCUMENT_ROOT 和 REMOTE_ADDR。
+func basicFastCGISetupSessionHandler(docRoot string, trustedProxies []string, logger *slog.Logger) func(inner gofast.SessionHandler) gofast.SessionHandler {
+	return func(inner gofast.SessionHandler) gofast.SessionHandler {
+		return func(client gofast.Client, req *gofast.Request) (*gofast.ResponsePipe, error) {
+			// 设置 DOCUMENT_ROOT
+			req.Params["DOCUMENT_ROOT"] = docRoot
+
+			// 获取并设置真实的客户端 IP (REMOTE_ADDR) 和代理头
+			realIP := GetRealIP(req.Raw, trustedProxies)
+			req.Params["REMOTE_ADDR"] = realIP
+			if forwardedFor := req.Raw.Header.Get("X-Forwarded-For"); forwardedFor != "" {
+				req.Params["HTTP_X_FORWARDED_FOR"] = forwardedFor
+			}
+			if realIPHeader := req.Raw.Header.Get("X-Real-IP"); realIPHeader != "" {
+				req.Params["HTTP_X_REAL_IP"] = realIPHeader
+			}
+			logger.Debug("设置基本 FastCGI 参数", "doc_root", docRoot, "remote_addr", realIP)
+
+			return inner(client, req)
+		}
+	}
+}
+
 // createPHPHandler 创建处理PHP请求的HTTP处理器
-func createPHPHandler(connFactory gofast.ConnFactory, docRoot, accelRoot, mainPHPFile string, manager *TokenBucketManager, trustedProxies []string, logger *slog.Logger) http.Handler { // 添加 logger 参数
+func createPHPHandler(connFactory gofast.ConnFactory, docRoot, accelRoot, mainPHPFile string, manager *TokenBucketManager, trustedProxies []string, logger *slog.Logger, tryFiles bool, errorPages map[int]string) http.Handler { // 重新加入 tryFiles 和 errorPages 参数
 	clientFactory := gofast.SimpleClientFactory(connFactory)
 
-	// 创建会话处理器，总是将请求路由到docRoot/mainPHPFile
-	alwaysIndexSessionHandler := gofast.Chain(
-		gofast.BasicParamsMap,
-		gofast.MapHeader,
-		gofast.MapRemoteHost,
-		func(inner gofast.SessionHandler) gofast.SessionHandler {
-			return func(client gofast.Client, req *gofast.Request) (*gofast.ResponsePipe, error) {
-				// 设置必要的FastCGI参数
-				req.Params["DOCUMENT_ROOT"] = docRoot
-				// 显式设置脚本为docRoot下从参数读取的mainPHPFile
-				req.Params["SCRIPT_FILENAME"] = filepath.Join(docRoot, mainPHPFile)
-				// SCRIPT_NAME通常是相对于DOCUMENT_ROOT的路径
-				req.Params["SCRIPT_NAME"] = "/" + mainPHPFile
-				// REQUEST_URI应保持原始请求URI(例如/123.zip)
-				// gofast.BasicParamsMap会处理这个以及QUERY_STRING, REQUEST_METHOD等
-				logger.Debug("路由请求到 PHP", "request_uri", req.Params["REQUEST_URI"], "script_filename", req.Params["SCRIPT_FILENAME"]) // 使用 Debug 级别
-
-				// 获取真实的客户端IP
-				realIP := GetRealIP(req.Raw, trustedProxies)
-				// 设置REMOTE_ADDR为真实客户端IP
-				req.Params["REMOTE_ADDR"] = realIP
-				// 保存原始X-Forwarded-For头信息（如果存在）
-				if forwardedFor := req.Raw.Header.Get("X-Forwarded-For"); forwardedFor != "" {
-					req.Params["HTTP_X_FORWARDED_FOR"] = forwardedFor
-				}
-				// 传递其他代理相关头信息
-				if realIP := req.Raw.Header.Get("X-Real-IP"); realIP != "" {
-					req.Params["HTTP_X_REAL_IP"] = realIP
-				}
-
-				logger.Debug("处理请求", "client_ip", realIP, "request_uri", req.Params["REQUEST_URI"]) // 使用 Debug 级别
-				return inner(client, req)
-			}
-		},
-	)(gofast.BasicSession) // BasicSession处理实际的FastCGI通信
+	// 创建 FastCGI 会话处理器链
+	phpSessionHandler := gofast.Chain(
+		gofast.BasicParamsMap, // 处理基本 CGI 参数 (REQUEST_METHOD, QUERY_STRING, etc.)
+		gofast.MapHeader,      // 映射 HTTP 请求头到 FastCGI (HTTP_*)
+		gofast.MapRemoteHost,  // 设置 REMOTE_HOST (可能基于 REMOTE_ADDR)
+		basicFastCGISetupSessionHandler(docRoot, trustedProxies, logger), // 设置 DOCUMENT_ROOT, REMOTE_ADDR 等
+		phpScriptRouterSessionHandler(docRoot, mainPHPFile, logger),      // 动态设置 SCRIPT_FILENAME 和 SCRIPT_NAME
+	)(gofast.BasicSession) // BasicSession 处理实际的 FastCGI 通信
 
 	// 创建主处理器，使用我们修改过的会话处理器
 	phpFSHandler := gofast.NewHandler(
-		alwaysIndexSessionHandler, // 使用总是指向mainPHPFile的处理器
+		phpSessionHandler, // 使用包含路由逻辑的处理器链
 		clientFactory,
 	)
 
 	// 包装处理器，处理X-Accel-Redirect并添加限速
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 创建自定义的ResponseWriter用于捕获响应
-		rw := &responseInterceptor{
-			ResponseWriter: w,
-			headersSent:    false,
-			accelPath:      "",
+		// 尝试处理静态文件或目录 (如果 tryFiles 启用)
+		if tryFiles && handleTryFiles(w, r, docRoot, errorPages, logger) {
+			return // 请求已被 handleTryFiles 处理
 		}
 
-		phpFSHandler.ServeHTTP(rw, r)
-
-		// 如果需要X-Accel-Redirect，则处理
-		if rw.accelPath != "" {
-			logger.Info("处理 X-Accel-Redirect", "accel_path", rw.accelPath, "request_uri", r.URL.Path)
-
-			targetPath := filepath.Join(accelRoot, rw.accelPath)
-			cleanAccelRoot, _ := filepath.Abs(accelRoot)
-			cleanTargetPath, _ := filepath.Abs(targetPath)
-
-			if !filepath.HasPrefix(cleanTargetPath, cleanAccelRoot) {
-				logger.Warn("阻止X-Accel-Redirect路径遍历尝试", "accel_path", rw.accelPath)
-				http.Error(w, "Forbidden", http.StatusForbidden)
-				return
-			}
-
-			// 检查文件是否存在
-			fileInfo, err := os.Stat(cleanTargetPath)
-			if os.IsNotExist(err) {
-				logger.Warn("X-Accel-Redirect文件未找到", "path", cleanTargetPath)
-				http.NotFound(w, r)
-				return
-			} else if err != nil {
-				logger.Error("访问X-Accel-Redirect文件错误", "path", cleanTargetPath, "error", err)
-				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-				return
-			}
-
-			// (例如，Content-Disposition 用于下载)
-			// 将原始 ResponseWriter 的 Header() 传递给 copyHeaders
-			//copyHeaders(w.Header(), rw.Header()) //不需要此操作，原因不明???
-
-			// 获取或创建共享的 RateLimiter (使用传入的 manager)
-			var sharedLimiter *RateLimiter
-			// 使用从 header 中获取的 accelLimitBytes
-			if rw.accelTokenID != "" && rw.accelLimitBytes > 0 { // 仅当同时提供了有效的 Token ID 和 Limit 时才创建/获取限速器
-				// 使用GetLimiter函数获取或创建令牌桶
-				limiter := manager.GetLimiter(rw.accelTokenID, rate.Limit(rw.accelLimitBytes), int(float64(rw.accelLimitBytes)*1.5))
-				logger.Debug("获取或创建速率限制器", "token_id", rw.accelTokenID, "limit_bytes", rw.accelLimitBytes)
-				limiter.SetLimit(rate.Limit(rw.accelLimitBytes))
-				limiter.SetBurst(int(float64(rw.accelLimitBytes) * 1.5))
-				logger.Debug("更新速率限制器设置", "token_id", rw.accelTokenID, "limit_burst", int(float64(rw.accelLimitBytes)*1.5))
-
-				sharedLimiter = limiter
-			}
-			// 如果没有提供 Token ID 或有效的 Limit，sharedLimiter 将保持为 nil，表示不限速
-
-			// 调用统一的文件发送函数，传递获取到的限速器 (可能为 nil)
-			sendFileWithSendfile(r.Context(), rw, r, cleanTargetPath, fileInfo, sharedLimiter, logger) // 传递 logger
-		}
-		// 否则：正常响应已由responseInterceptor写入原始ResponseWriter处理
+		// 如果未被 tryFiles 处理，则执行 PHP 请求
+		processPHPRequest(w, r, phpFSHandler, accelRoot, manager, logger)
 	})
+}
+
+// handleTryFiles 尝试处理静态文件、目录或自定义错误页面。
+// 如果请求被处理，则返回 true；否则返回 false，表示应继续处理 PHP。
+func handleTryFiles(w http.ResponseWriter, r *http.Request, docRoot string, errorPages map[int]string, logger *slog.Logger) bool {
+	requestPath := r.URL.Path
+
+	// 如果请求的是 .php 文件，不由此函数处理，交给 PHP 处理器
+	if strings.HasSuffix(requestPath, ".php") {
+		return false
+	}
+
+	filePath := filepath.Join(docRoot, requestPath)
+
+	// 检查文件是否存在
+	fileInfo, err := os.Stat(filePath)
+	if err == nil {
+		if fileInfo.IsDir() {
+			// 如果是目录，返回 403 Forbidden
+			logger.Debug("tryFiles 匹配到目录，返回 403", "path", filePath)
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return true // 请求已处理
+		}
+		// 如果是文件，直接提供
+		logger.Debug("tryFiles 匹配到文件，直接提供", "path", filePath)
+		http.ServeFile(w, r, filePath)
+		return true // 请求已处理
+	}
+
+	// 如果文件或目录不存在 (os.IsNotExist(err) is true)
+	if os.IsNotExist(err) {
+		// 检查自定义 404 页面
+		if custom404, ok := errorPages[http.StatusNotFound]; ok {
+			custom404Path := filepath.Join(docRoot, custom404)
+			if _, err := os.Stat(custom404Path); err == nil {
+				logger.Debug("tryFiles 未找到请求路径，提供自定义 404", "request_path", requestPath, "404_path", custom404Path)
+				w.WriteHeader(http.StatusNotFound)
+				http.ServeFile(w, r, custom404Path)
+				return true // 请求已处理
+			}
+		}
+		// 没有匹配到任何东西，让 PHP 处理器处理 (可能生成动态 404 或路由)
+		logger.Debug("tryFiles 未匹配到任何静态资源，转交 PHP 处理", "request_path", requestPath)
+		return false
+	}
+
+	// 其他 Stat 错误 (例如权限问题)
+	logger.Error("tryFiles 检查文件/目录时出错", "path", filePath, "error", err)
+	http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	return true // 请求已处理 (返回错误)
+}
+
+// processPHPRequest 处理 PHP 请求，包括调用 FastCGI 和处理 X-Accel-Redirect。
+func processPHPRequest(w http.ResponseWriter, r *http.Request, phpHandler http.Handler, accelRoot string, manager *TokenBucketManager, logger *slog.Logger) {
+	// 创建自定义的ResponseWriter用于捕获响应
+	rw := &responseInterceptor{
+		ResponseWriter: w,
+		headersSent:    false,
+		accelPath:      "",
+	}
+
+	// 将请求传递给 PHP FastCGI 处理器
+	phpHandler.ServeHTTP(rw, r)
+
+	// 如果 PHP 返回了 X-Accel-Redirect 头，则处理内部重定向
+	if rw.accelPath != "" {
+		handleAccelRedirect(rw, r, accelRoot, manager, logger)
+	}
+}
+
+// handleAccelRedirect 处理 X-Accel-Redirect 逻辑
+func handleAccelRedirect(w *responseInterceptor, r *http.Request, accelRoot string, manager *TokenBucketManager, logger *slog.Logger) {
+	logger.Info("处理 X-Accel-Redirect", "accel_path", w.accelPath, "request_uri", r.URL.Path)
+
+	targetPath := filepath.Join(accelRoot, w.accelPath)
+
+	// 安全检查：防止路径遍历
+	cleanTargetPath, _ := filepath.Abs(targetPath)
+	if !strings.HasPrefix(cleanTargetPath, filepath.Clean(accelRoot)+"/") {
+		logger.Warn("阻止X-Accel-Redirect路径遍历尝试", "accel_path", w.accelPath)
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	// 检查目标文件是否存在
+	fileInfo, err := os.Stat(targetPath)
+	if os.IsNotExist(err) {
+		logger.Warn("X-Accel-Redirect文件未找到", "path", targetPath)
+		http.NotFound(w.ResponseWriter, r)
+		return
+	} else if err != nil {
+		logger.Error("访问X-Accel-Redirect文件错误", "path", targetPath, "error", err)
+		http.Error(w.ResponseWriter, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	// 获取或创建共享的 RateLimiter
+	var sharedLimiter *RateLimiter
+	if w.accelTokenID != "" && w.accelLimitBytes > 0 {
+		// 检查 manager 是否为 nil
+		if manager == nil {
+			logger.Error("TokenBucketManager 未初始化，无法应用速率限制")
+		} else {
+			limiter := manager.GetLimiter(w.accelTokenID, rate.Limit(w.accelLimitBytes), int(float64(w.accelLimitBytes)*1.5))
+			logger.Debug("获取或创建速率限制器", "token_id", w.accelTokenID, "limit_bytes", w.accelLimitBytes)
+			limiter.SetLimit(rate.Limit(w.accelLimitBytes))
+			limiter.SetBurst(int(float64(w.accelLimitBytes) * 1.5))
+			logger.Debug("更新速率限制器设置", "token_id", w.accelTokenID, "limit_burst", int(float64(w.accelLimitBytes)*1.5))
+			sharedLimiter = limiter
+		}
+	}
+
+	// 使用 sendfile 发送文件
+	sendFileWithSendfile(r.Context(), w, r, cleanTargetPath, fileInfo, sharedLimiter, logger)
 }
 
 // responseInterceptor 是一个拦截响应的自定义ResponseWriter
@@ -434,32 +541,6 @@ func sendFileWithSendfile(ctx context.Context, w *responseInterceptor, r *http.R
 	}
 
 	logger.Info("完成sendfile传输", "path", filePath, "sent_bytes", sentBytes)
-}
-
-// copyHeaders从src复制头信息到dst，排除hop-by-hop和X-Accel头
-func copyHeaders(dst, src http.Header) {
-	for k, vv := range src {
-		// 规范化header key以便比较
-		normalizedKey := http.CanonicalHeaderKey(k)
-		// 不要复制hop-by-hop头或特定的X-Accel头
-		if normalizedKey == "Connection" ||
-			normalizedKey == "Keep-Alive" ||
-			normalizedKey == "Proxy-Authenticate" ||
-			normalizedKey == "Proxy-Authorization" ||
-			normalizedKey == "Te" || // canonicalized version of "TE"
-			normalizedKey == "Trailers" ||
-			normalizedKey == "Transfer-Encoding" ||
-			normalizedKey == "Upgrade" ||
-			normalizedKey == "X-Accel-Redirect" ||
-			normalizedKey == "X-Accel-Limit-Rate" ||
-			normalizedKey == "X-Accel-Token-Id" {
-			continue
-		}
-		// 添加剩余的头信息
-		for _, v := range vv {
-			dst.Add(k, v) // 使用Add处理同一header的多个值
-		}
-	}
 }
 
 // Range 表示 HTTP 范围请求中的字节范围

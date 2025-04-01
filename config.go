@@ -30,6 +30,10 @@ type Config struct {
 
 	// 新增日志级别配置
 	LogLevel string `yaml:"log_level"`
+
+	// try_files 和错误页面配置
+	TryFiles   bool           `yaml:"try_files"`   // 是否启用 try_files 功能
+	ErrorPages map[int]string `yaml:"error_pages"` // 错误页面映射 (例如 404: "/404.html")
 }
 
 // 默认配置值
@@ -51,6 +55,10 @@ var defaultConfig = Config{
 	RedisDB:        0,
 	RedisKeyPrefix: "gopp:rate:",
 	RedisKeyTTL:    3600, // 1小时TTL
+
+	// try_files 和错误页面默认值
+	TryFiles:   true,             // 默认启用 try_files
+	ErrorPages: map[int]string{}, // 默认没有自定义错误页面
 }
 
 // loadConfig从YAML文件加载配置
@@ -79,6 +87,10 @@ func loadConfig(path string) (Config, error) {
 	// 处理trusted_proxies字段，若未设置则为空切片
 	if config.TrustedProxies == nil {
 		config.TrustedProxies = []string{}
+	}
+	// 确保ErrorPages有默认值
+	if config.ErrorPages == nil {
+		config.ErrorPages = defaultConfig.ErrorPages
 	}
 	return config, nil
 }
