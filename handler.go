@@ -15,7 +15,7 @@ import (
 	"syscall"
 
 	"github.com/yookoala/gofast"
-	"golang.org/x/time/rate" // 保留rate导入用于RateLimiter类型
+	// 移除 "golang.org/x/time/rate"
 )
 
 // GetRealIP 从请求中获取真实的客户端IP地址
@@ -153,7 +153,8 @@ func basicFastCGISetupSessionHandler(logger *slog.Logger, docRoot string, truste
 }
 
 // createPHPHandler 创建处理PHP请求的HTTP处理器
-func createPHPHandler(logger *slog.Logger, connFactory gofast.ConnFactory, docRoot, accelRoot, mainPHPFile string, manager *TokenBucketManager, trustedProxies []string) http.Handler {
+// createPHPHandler 不再需要 manager 参数
+func createPHPHandler(logger *slog.Logger, connFactory gofast.ConnFactory, docRoot, accelRoot, mainPHPFile string, trustedProxies []string) http.Handler {
 	clientFactory := gofast.SimpleClientFactory(connFactory)
 
 	phpSessionHandler := gofast.Chain(
@@ -200,23 +201,24 @@ func createPHPHandler(logger *slog.Logger, connFactory gofast.ConnFactory, docRo
 				return
 			}
 
-			var sharedLimiter *RateLimiter
+			var sharedLimiter *RedisCellLimiter // 使用新的限速器类型
 			if rw.accelTokenID != "" && rw.accelLimitBytes > 0 {
-				if manager == nil { // Use manager from outer scope
-					logger.Error("TokenBucketManager 未初始化，无法应用速率限制")
+				// 尝试从 bandwidth_manager 获取限速器
+				limiter, err := GetOrCreateLimiter(rw.accelTokenID, int64(rw.accelLimitBytes))
+				if err != nil {
+					// 如果 bandwidth_manager 未初始化 (例如 Redis 未配置或连接失败)，
+					// GetOrCreateLimiter 可能会返回错误或 panic。
+					// 这里我们记录错误，但不阻止文件发送（无限制）。
+					logger.Error("无法获取带宽限制器，将不进行限制", "token_id", rw.accelTokenID, "error", err)
 				} else {
-					// Calculate burst based on limit (e.g., 1.5x limit)
-					burst := int(float64(rw.accelLimitBytes) * 1.5)
-					limiter := manager.GetLimiter(rw.accelTokenID, rate.Limit(rw.accelLimitBytes), burst)
-					logger.Debug("获取或创建速率限制器", "token_id", rw.accelTokenID, "limit_bytes", rw.accelLimitBytes, "burst", burst)
-					// Ensure the limiter has the latest settings (GetLimiter might create or update)
-					limiter.SetLimit(rate.Limit(rw.accelLimitBytes))
-					limiter.SetBurst(burst)
+					logger.Debug("获取或创建带宽限制器", "token_id", rw.accelTokenID, "limit_bytes", rw.accelLimitBytes)
 					sharedLimiter = limiter
 				}
 			}
 
 			// Pass the interceptor (rw) which holds the original ResponseWriter
+			// 将 tokenID 传递给 sendFileWithSendfile，因为 RedisCellLimiter.WaitN 需要它
+			// 不再需要传递 tokenID 给 sendFileWithSendfile
 			sendFileWithSendfile(logger, r.Context(), rw, r, cleanTargetPath, fileInfo, sharedLimiter)
 		}
 	})
@@ -320,7 +322,7 @@ func (rw *responseInterceptor) Flush() {
 
 // sendFileWithSendfile 使用sendfile系统调用发送文件，并应用传入的令牌桶限速器
 func sendFileWithSendfile(logger *slog.Logger, ctx context.Context, w *responseInterceptor, r *http.Request, filePath string,
-	fileInfo os.FileInfo, limiter *RateLimiter) {
+	fileInfo os.FileInfo, limiter *RedisCellLimiter) { // 移除 tokenID 参数
 
 	originalWriter := w.ResponseWriter
 	originalWriter.Header().Set("Accept-Ranges", "bytes")
@@ -437,7 +439,9 @@ func sendFileWithSendfile(logger *slog.Logger, ctx context.Context, w *responseI
 
 		if limiter != nil {
 			// Wait 会阻塞直到获得令牌或上下文被取消
-			waitErr := limiter.Wait(ctx, chunkSize) // 使用传入的 limiter
+			// 使用 RedisCellLimiter 的 WaitN 方法，需要 key (tokenID) 和字节数 (chunkSize)
+			// 调用新的 WaitN 签名，不再需要 tokenID
+			waitErr := limiter.WaitN(ctx, int64(chunkSize))
 			if waitErr != nil {
 				// 如果上下文被取消（例如，客户端断开连接）或发生其他错误，则停止发送
 				logger.Warn("速率限制器等待错误，停止传输", "error", waitErr)

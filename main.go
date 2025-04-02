@@ -8,6 +8,8 @@ import (
 	"strings" // 用于日志级别字符串处理
 	"time"
 
+	"github.com/go-redis/redis/v8" // 引入 redis 客户端
+
 	"github.com/yookoala/gofast"
 )
 
@@ -68,51 +70,39 @@ func main() {
 
 	connFactory := gofast.SimpleConnFactory(config.FPMNetwork, config.FPMAddress)
 
-	// --- 创建速率限制后端 ---
-	var backend RateLimiterBackend
-	var backendErr error
-
+	// --- 初始化带宽管理器 ---
 	if config.RedisBackend {
-		logger.Info("配置使用 Redis 后端进行速率限制")
-		// 尝试创建 Redis 后端，让它自己管理连接 (传入 nil client)
-		redisBackend, err := NewRedisBackend(&config, nil, logger)
+		logger.Info("配置使用 Redis 后端进行带宽限制")
+		redisOpts := &redis.Options{
+			Addr:     config.RedisAddr,
+			Password: config.RedisPassword,
+			DB:       config.RedisDB,
+		}
+		err := InitBandwidthManager(redisOpts)
 		if err != nil {
-			logger.Warn("无法初始化 Redis 后端，将回退到内存后端", "error", err)
-			backend = NewMemoryBackend(logger) // 回退到内存
-			logger.Info("已回退到内存后端进行速率限制")
+			logger.Error("无法初始化 Redis 带宽管理器", "error", err)
+			os.Exit(1) // 初始化失败则退出
 		} else {
-			backend = redisBackend
-			logger.Info("成功初始化 Redis 后端")
+			logger.Info("成功初始化 Redis 带宽管理器")
 		}
 	} else {
-		logger.Info("配置使用内存后端进行速率限制")
-		backend = NewMemoryBackend(logger) // 使用内存后端
+		logger.Info("未配置 Redis 后端，带宽限制功能将不可用")
+		// 注意：如果未配置 Redis，GetOrCreateLimiter 将无法工作，
+		// handler 中需要处理 managerRedisClient 为 nil 的情况，
+		// 或者在此处提供一个空操作的 Limiter 实现。
+		// 当前 bandwidth_manager 实现会在未初始化时 panic 或返回错误。
+		// 为了简单起见，如果未配置 Redis，我们假设不需要带宽限制。
 	}
-	// --- 后端创建完毕 ---
+	// --- 带宽管理器初始化完毕 ---
 
-	tokenManager, backendErr := NewTokenBucketManager(&config, backend, logger)
-	if backendErr != nil {
-		// 如果 NewTokenBucketManager 出错（例如 backend 为 nil），则致命错误
-		logger.Error("无法创建令牌桶管理器", "error", backendErr)
-		os.Exit(1) // 替换 log.Fatalf
-	}
-	// 程序结束时关闭令牌桶管理器（这将关闭其使用的后端）
-	defer func() {
-		logger.Info("正在关闭令牌桶管理器...")
-		if err := tokenManager.Close(); err != nil {
-			logger.Error("关闭令牌桶管理器时出错", "error", err)
-		} else {
-			logger.Info("令牌桶管理器已关闭")
-		}
-	}()
-
+	// 注意：createPHPHandler 不再需要 manager 参数
 	phpHandler := createPHPHandler(
 		logger,
 		connFactory,
 		config.DocRoot,
 		config.AccelRoot,
 		config.MainPHPFile,
-		tokenManager,
+		// 移除 tokenManager
 		config.TrustedProxies,
 	)
 
