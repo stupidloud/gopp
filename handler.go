@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log/slog" // 替换 log
 	"math"
 	"net"
 	"net/http"
@@ -15,7 +14,6 @@ import (
 	"syscall"
 
 	"github.com/yookoala/gofast"
-	// 移除 "golang.org/x/time/rate"
 )
 
 // GetRealIP 从请求中获取真实的客户端IP地址
@@ -94,37 +92,36 @@ func secureJoinPath(basePath, requestedPath string) (string, error) {
 
 // phpScriptRouterSessionHandler 是一个 gofast.SessionHandler 中间件，
 // 用于根据请求路径动态设置 SCRIPT_FILENAME 和 SCRIPT_NAME。
-func phpScriptRouterSessionHandler(logger *slog.Logger, docRoot string, mainPHPFile string) func(inner gofast.SessionHandler) gofast.SessionHandler {
+func phpScriptRouterSessionHandler(appCtx *AppContext) func(inner gofast.SessionHandler) gofast.SessionHandler {
 	return func(inner gofast.SessionHandler) gofast.SessionHandler {
 		return func(client gofast.Client, req *gofast.Request) (*gofast.ResponsePipe, error) {
 			requestPath := req.Raw.URL.Path
-			scriptToExecute := mainPHPFile
-			scriptName := "/" + mainPHPFile
+			scriptToExecute := appCtx.Config.MainPHPFile
+			scriptName := "/" + appCtx.Config.MainPHPFile
 
 			if strings.HasSuffix(requestPath, ".php") {
-				cleanTargetPath, err := secureJoinPath(docRoot, requestPath)
+				cleanTargetPath, err := secureJoinPath(appCtx.Config.DocRoot, requestPath)
 				if err != nil {
-					logger.Warn("安全路径检查失败", "requested_path", requestPath, "doc_root", docRoot, "error", err)
-					// 返回更通用的错误，避免泄露内部路径结构
+					appCtx.Logger.Warn("安全路径检查失败", "requested_path", requestPath, "doc_root", appCtx.Config.DocRoot, "error", err)
 					return nil, fmt.Errorf("forbidden: invalid or disallowed path %s", requestPath)
 				}
 				requestedScriptPath := cleanTargetPath
 
 				if _, err := os.Stat(requestedScriptPath); err == nil {
-					scriptToExecute = requestPath // 使用相对路径
+					scriptToExecute = requestPath
 					scriptName = requestPath
 				} else if os.IsNotExist(err) {
-					logger.Debug("请求的 .php 文件不存在", "requested_path", requestPath)
+					appCtx.Logger.Debug("请求的 .php 文件不存在", "requested_path", requestPath)
 					return nil, fmt.Errorf("not found: script %s not found", requestPath)
 				} else {
-					logger.Error("检查请求的 .php 文件时出错", "path", requestedScriptPath, "error", err)
+					appCtx.Logger.Error("检查请求的 .php 文件时出错", "path", requestedScriptPath, "error", err)
 					return nil, fmt.Errorf("internal server error checking script %s", requestPath)
 				}
 			}
 
-			req.Params["SCRIPT_FILENAME"] = filepath.Join(docRoot, scriptToExecute)
+			req.Params["SCRIPT_FILENAME"] = filepath.Join(appCtx.Config.DocRoot, scriptToExecute)
 			req.Params["SCRIPT_NAME"] = scriptName
-			logger.Debug("PHP 脚本路由", "script_filename", req.Params["SCRIPT_FILENAME"], "script_name", req.Params["SCRIPT_NAME"])
+			appCtx.Logger.Debug("PHP 脚本路由", "script_filename", req.Params["SCRIPT_FILENAME"], "script_name", req.Params["SCRIPT_NAME"])
 
 			return inner(client, req)
 		}
@@ -132,12 +129,12 @@ func phpScriptRouterSessionHandler(logger *slog.Logger, docRoot string, mainPHPF
 }
 
 // basicFastCGISetupSessionHandler 设置基本的 FastCGI 参数，如 DOCUMENT_ROOT 和 REMOTE_ADDR。
-func basicFastCGISetupSessionHandler(logger *slog.Logger, docRoot string, trustedProxies []string) func(inner gofast.SessionHandler) gofast.SessionHandler {
+func basicFastCGISetupSessionHandler(appCtx *AppContext) func(inner gofast.SessionHandler) gofast.SessionHandler {
 	return func(inner gofast.SessionHandler) gofast.SessionHandler {
 		return func(client gofast.Client, req *gofast.Request) (*gofast.ResponsePipe, error) {
-			req.Params["DOCUMENT_ROOT"] = docRoot
+			req.Params["DOCUMENT_ROOT"] = appCtx.Config.DocRoot
 
-			realIP := GetRealIP(req.Raw, trustedProxies)
+			realIP := GetRealIP(req.Raw, appCtx.Config.TrustedProxies)
 			req.Params["REMOTE_ADDR"] = realIP
 			if forwardedFor := req.Raw.Header.Get("X-Forwarded-For"); forwardedFor != "" {
 				req.Params["HTTP_X_FORWARDED_FOR"] = forwardedFor
@@ -145,7 +142,7 @@ func basicFastCGISetupSessionHandler(logger *slog.Logger, docRoot string, truste
 			if realIPHeader := req.Raw.Header.Get("X-Real-IP"); realIPHeader != "" {
 				req.Params["HTTP_X_REAL_IP"] = realIPHeader
 			}
-			logger.Debug("设置基本 FastCGI 参数", "doc_root", docRoot, "remote_addr", realIP)
+			appCtx.Logger.Debug("设置基本 FastCGI 参数", "doc_root", appCtx.Config.DocRoot, "remote_addr", realIP)
 
 			return inner(client, req)
 		}
@@ -153,109 +150,98 @@ func basicFastCGISetupSessionHandler(logger *slog.Logger, docRoot string, truste
 }
 
 // createPHPHandler 创建处理PHP请求的HTTP处理器
-// createPHPHandler 不再需要 manager 参数
-func createPHPHandler(logger *slog.Logger, connFactory gofast.ConnFactory, docRoot, accelRoot, mainPHPFile string, trustedProxies []string) http.Handler {
-	clientFactory := gofast.SimpleClientFactory(connFactory)
+func createPHPHandler(appCtx *AppContext) http.Handler {
+	clientFactory := gofast.SimpleClientFactory(appCtx.ConnFactory)
 
 	phpSessionHandler := gofast.Chain(
-		gofast.BasicParamsMap, // 处理基本 CGI 参数 (REQUEST_METHOD, QUERY_STRING, etc.)
-		gofast.MapHeader,      // 映射 HTTP 请求头到 FastCGI (HTTP_*)
-		gofast.MapRemoteHost,  // 设置 REMOTE_HOST (可能基于 REMOTE_ADDR)
-		basicFastCGISetupSessionHandler(logger, docRoot, trustedProxies), // 设置 DOCUMENT_ROOT, REMOTE_ADDR 等
-		phpScriptRouterSessionHandler(logger, docRoot, mainPHPFile),      // 动态设置 SCRIPT_FILENAME 和 SCRIPT_NAME
-	)(gofast.BasicSession) // BasicSession 处理实际的 FastCGI 通信
+		gofast.BasicParamsMap,                   // 基本 CGI 参数
+		gofast.MapHeader,                        // HTTP 请求头
+		gofast.MapRemoteHost,                    // REMOTE_HOST
+		basicFastCGISetupSessionHandler(appCtx), // 设置 DOCUMENT_ROOT, REMOTE_ADDR 等
+		phpScriptRouterSessionHandler(appCtx),   // 设置 SCRIPT_FILENAME, SCRIPT_NAME
+	)(gofast.BasicSession) // 处理 FastCGI 通信
 
 	phpFSHandler := gofast.NewHandler(
-		phpSessionHandler, // 使用包含路由逻辑的处理器链
+		phpSessionHandler,
 		clientFactory,
 	)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handleTryFiles(logger, w, r, docRoot)
+		handleTryFiles(appCtx, w, r)
 
 		rw := &responseInterceptor{
 			ResponseWriter: w,
 			headersSent:    false,
 			accelPath:      "",
-			// accelTokenID and accelLimitBytes will be populated by WriteHeader
+			appCtx:         appCtx,
 		}
 
-		phpFSHandler.ServeHTTP(rw, r) // Use phpFSHandler from outer scope
+		phpFSHandler.ServeHTTP(rw, r)
 
 		if rw.accelPath != "" {
-			logger.Info("处理 X-Accel-Redirect", "accel_path", rw.accelPath, "request_uri", r.URL.Path)
+			rw.appCtx.Logger.Info("处理 X-Accel-Redirect", "accel_path", rw.accelPath, "request_uri", r.URL.Path)
 
-			cleanTargetPath, err := secureJoinPath(accelRoot, rw.accelPath)
+			cleanTargetPath, err := secureJoinPath(appCtx.Config.AccelRoot, rw.accelPath)
 			if err != nil {
-				logger.Warn("X-Accel-Redirect 安全路径检查失败", "accel_path", rw.accelPath, "accel_root", accelRoot, "error", err)
+				rw.appCtx.Logger.Warn("X-Accel-Redirect 安全路径检查失败", "accel_path", rw.accelPath, "accel_root", appCtx.Config.AccelRoot, "error", err)
 				return
 			}
-			fileInfo, err := os.Stat(cleanTargetPath) // Use cleanTargetPath for Stat
+			fileInfo, err := os.Stat(cleanTargetPath)
 			if os.IsNotExist(err) {
-				logger.Warn("X-Accel-Redirect文件未找到", "path", cleanTargetPath)
-				// Use the original ResponseWriter
+				rw.appCtx.Logger.Warn("X-Accel-Redirect文件未找到", "path", cleanTargetPath)
 				return
 			} else if err != nil {
-				logger.Error("访问X-Accel-Redirect文件错误", "path", cleanTargetPath, "error", err)
-				// Use the original ResponseWriter
+				rw.appCtx.Logger.Error("访问X-Accel-Redirect文件错误", "path", cleanTargetPath, "error", err)
 				return
 			}
 
-			var sharedLimiter *RedisCellLimiter // 使用新的限速器类型
+			var sharedLimiter *RedisCellLimiter
 			if rw.accelTokenID != "" && rw.accelLimitBytes > 0 {
-				// 尝试从 bandwidth_manager 获取限速器
-				limiter, err := GetOrCreateLimiter(rw.accelTokenID, int64(rw.accelLimitBytes))
+				limiter, err := GetOrCreateLimiter(rw.appCtx, rw.accelTokenID, int64(rw.accelLimitBytes))
 				if err != nil {
-					// 如果 bandwidth_manager 未初始化 (例如 Redis 未配置或连接失败)，
-					// GetOrCreateLimiter 可能会返回错误或 panic。
-					// 这里我们记录错误，但不阻止文件发送（无限制）。
-					logger.Error("无法获取带宽限制器，将不进行限制", "token_id", rw.accelTokenID, "error", err)
+					// 如果 Redis 未初始化或 GetOrCreateLimiter 失败，记录错误
+					rw.appCtx.Logger.Error("无法获取带宽限制器，将不进行限制", "token_id", rw.accelTokenID, "error", err)
 				} else {
-					logger.Debug("获取或创建带宽限制器", "token_id", rw.accelTokenID, "limit_bytes", rw.accelLimitBytes)
+					rw.appCtx.Logger.Debug("获取或创建带宽限制器", "token_id", rw.accelTokenID, "limit_bytes", rw.accelLimitBytes)
 					sharedLimiter = limiter
 				}
 			}
 
-			// Pass the interceptor (rw) which holds the original ResponseWriter
-			// 将 tokenID 传递给 sendFileWithSendfile，因为 RedisCellLimiter.WaitN 需要它
-			// 不再需要传递 tokenID 给 sendFileWithSendfile
-			sendFileWithSendfile(logger, r.Context(), rw, r, cleanTargetPath, fileInfo, sharedLimiter)
+			sendFileWithSendfile(rw.appCtx, r.Context(), rw, r, cleanTargetPath, fileInfo, sharedLimiter)
 		}
 	})
 }
 
 // handleTryFiles 尝试处理静态文件、目录或自定义错误页面。
 // 如果请求被处理，则返回 true；否则返回 false，表示应继续处理 PHP。
-func handleTryFiles(logger *slog.Logger, w http.ResponseWriter, r *http.Request, docRoot string) bool {
+func handleTryFiles(appCtx *AppContext, w http.ResponseWriter, r *http.Request) bool {
 	requestPath := r.URL.Path
 
 	if strings.HasSuffix(requestPath, ".php") {
 		return false
 	}
 
-	filePath := filepath.Join(docRoot, requestPath)
+	filePath := filepath.Join(appCtx.Config.DocRoot, requestPath)
 
 	fileInfo, err := os.Stat(filePath)
 	if err == nil {
 		if fileInfo.IsDir() {
-			logger.Debug("tryFiles 匹配到目录，返回 403", "path", filePath)
+			appCtx.Logger.Debug("tryFiles 匹配到目录，返回 403", "path", filePath)
 			return true
 		}
-		logger.Debug("tryFiles 匹配到文件，直接提供", "path", filePath)
+		appCtx.Logger.Debug("tryFiles 匹配到文件，直接提供", "path", filePath)
 		http.ServeFile(w, r, filePath)
 		return true
 	}
 
 	if os.IsNotExist(err) {
-		logger.Debug("tryFiles 未匹配到任何静态资源，转交 PHP 处理", "request_path", requestPath)
+		appCtx.Logger.Debug("tryFiles 未匹配到任何静态资源，转交 PHP 处理", "request_path", requestPath)
 		return false
 	}
 
-	logger.Error("tryFiles 检查文件/目录时出错", "path", filePath, "error", err)
+	appCtx.Logger.Error("tryFiles 检查文件/目录时出错", "path", filePath, "error", err)
 	return true
 }
-
-// processPHPRequest 和 handleAccelRedirect 函数已被内联到 createPHPHandler 中
 
 // responseInterceptor 是一个拦截响应的自定义ResponseWriter
 type responseInterceptor struct {
@@ -263,7 +249,8 @@ type responseInterceptor struct {
 	headersSent     bool
 	accelPath       string
 	accelTokenID    string
-	accelLimitBytes int // 新增字段，用于存储速率限制 (字节/s)，0表示未指定或无效
+	accelLimitBytes int // 速率限制 (字节/s)，0 表示未指定
+	appCtx          *AppContext
 }
 
 // WriteHeader 拦截WriteHeader调用以检测X-Accel-Redirect和X-Accel-Token-Id
@@ -277,26 +264,26 @@ func (rw *responseInterceptor) WriteHeader(code int) {
 		rw.accelPath = accelPath
 		rw.Header().Del("X-Accel-Redirect")
 
-		// 检查 X-Accel-Token-Id (只有在 X-Accel-Redirect 存在时才有意义)
+		// 检查 X-Accel-Token-Id
 		tokenID := rw.Header().Get("X-Accel-Token-Id")
 		if tokenID != "" {
 			rw.accelTokenID = tokenID
 			rw.Header().Del("X-Accel-Token-Id")
 		}
-		// 检查 X-Accel-Limit-Rate (单位:字节)
+		// 检查 X-Accel-Limit-Rate (字节/秒)
 		limitStr := rw.Header().Get("X-Accel-Limit-Rate")
 		if limitStr != "" {
 			limit, err := strconv.Atoi(limitStr)
 			if err == nil && limit > 0 {
 				rw.accelLimitBytes = limit
-				logger.Debug("收到 X-Accel-Limit-Rate", "limit_bytes", limit, "token_id", tokenID)
+				rw.appCtx.Logger.Debug("收到 X-Accel-Limit-Rate", "limit_bytes", limit, "token_id", tokenID)
 			} else {
-				logger.Warn("收到无效的 X-Accel-Limit-Rate 值，忽略速率限制", "value", limitStr, "token_id", tokenID)
+				rw.appCtx.Logger.Warn("收到无效的 X-Accel-Limit-Rate 值，忽略速率限制", "value", limitStr, "token_id", tokenID)
 			}
 			rw.Header().Del("X-Accel-Limit-Rate")
 		}
 
-		// 不要立即写入头，让外部处理器决定
+		// X-Accel-Redirect: 延迟写入头
 		return
 	}
 
@@ -309,7 +296,8 @@ func (rw *responseInterceptor) Write(b []byte) (int, error) {
 		return len(b), nil
 	}
 	if !rw.headersSent {
-		rw.WriteHeader(http.StatusOK) // 确保在发送响应体前发送头信息
+		// 确保在写入响应体前发送头信息
+		rw.WriteHeader(http.StatusOK)
 	}
 	return rw.ResponseWriter.Write(b)
 }
@@ -321,8 +309,8 @@ func (rw *responseInterceptor) Flush() {
 }
 
 // sendFileWithSendfile 使用sendfile系统调用发送文件，并应用传入的令牌桶限速器
-func sendFileWithSendfile(logger *slog.Logger, ctx context.Context, w *responseInterceptor, r *http.Request, filePath string,
-	fileInfo os.FileInfo, limiter *RedisCellLimiter) { // 移除 tokenID 参数
+func sendFileWithSendfile(appCtx *AppContext, ctx context.Context, w *responseInterceptor, r *http.Request, filePath string,
+	fileInfo os.FileInfo, limiter *RedisCellLimiter) {
 
 	originalWriter := w.ResponseWriter
 	originalWriter.Header().Set("Accept-Ranges", "bytes")
@@ -331,53 +319,51 @@ func sendFileWithSendfile(logger *slog.Logger, ctx context.Context, w *responseI
 	originalWriter.Header().Set("ETag", etag)
 
 	var startRange int64 = 0
-	var endRange int64 = fileInfo.Size() - 1 // Initialize endRange correctly
+	var endRange int64 = fileInfo.Size() - 1
 	var isPartialRequest bool = false
 
 	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
-		// 解析 Range 头 (例如 "bytes=0-1023")
-		// Removed duplicated declarations inside the block
+		// 解析 Range 头
 		ranges, err := parseRangeHeader(rangeHeader, fileInfo.Size())
 		if err != nil {
 			http.Error(originalWriter, "Invalid Range", http.StatusRequestedRangeNotSatisfiable)
 			return
 		}
 
-		// 为简化处理，我们只处理第一个范围（如果指定了多个）
+		// 仅处理第一个范围
 		if len(ranges) > 0 {
 			startRange = ranges[0].start
 			endRange = ranges[0].end
 			isPartialRequest = true
 
-			// Set Content-Range on the original writer's headers
 			originalWriter.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d",
 				startRange, endRange, fileInfo.Size()))
 		}
 	}
 
-	// 为 TCP 连接准备 hijack (在Linux上，这应该总是可行的)
+	// 准备 TCP 连接 hijack
 	hijacker, ok := originalWriter.(http.Hijacker)
 	if !ok {
-		logger.Error("ResponseWriter不支持Hijacker接口")
+		appCtx.Logger.Error("ResponseWriter不支持Hijacker接口")
 		return
 	}
 	conn, bufrw, err := hijacker.Hijack()
 	if err != nil {
-		logger.Error("无法劫持连接", "error", err)
+		appCtx.Logger.Error("无法劫持连接", "error", err)
 		return
 	}
 	defer conn.Close()
 
-	// 转换为 TCP 连接 (在Linux上，这应该总是成功的)
+	// 转换为 TCP 连接
 	tcpConn, ok := conn.(*net.TCPConn)
 	if !ok {
-		logger.Error("劫持的连接不是TCP连接")
+		appCtx.Logger.Error("劫持的连接不是TCP连接")
 		return
 	}
 
 	file, err := os.Open(filePath)
 	if err != nil {
-		logger.Error("打开文件错误", "path", filePath, "error", err)
+		appCtx.Logger.Error("打开文件错误", "path", filePath, "error", err)
 		return
 	}
 	defer file.Close()
@@ -385,14 +371,14 @@ func sendFileWithSendfile(logger *slog.Logger, ctx context.Context, w *responseI
 	if isPartialRequest {
 		_, err = file.Seek(startRange, io.SeekStart)
 		if err != nil {
-			logger.Error("定位文件范围起始错误", "offset", startRange, "error", err)
+			appCtx.Logger.Error("定位文件范围起始错误", "offset", startRange, "error", err)
 			return
 		}
 	}
 
 	tcpFile, err := tcpConn.File()
 	if err != nil {
-		logger.Error("获取TCP文件描述符错误", "error", err)
+		appCtx.Logger.Error("获取TCP文件描述符错误", "error", err)
 		return
 	}
 	defer tcpFile.Close()
@@ -402,7 +388,6 @@ func sendFileWithSendfile(logger *slog.Logger, ctx context.Context, w *responseI
 	if isPartialRequest {
 		respStatus = "HTTP/1.1 206 Partial Content\r\n"
 		contentLength = endRange - startRange + 1
-		// Content-Range头信息已在originalWriter上设置
 	} else {
 		respStatus = "HTTP/1.1 200 OK\r\n"
 		contentLength = fileInfo.Size()
@@ -411,11 +396,11 @@ func sendFileWithSendfile(logger *slog.Logger, ctx context.Context, w *responseI
 	bufrw.WriteString(respStatus)
 	bufrw.WriteString(fmt.Sprintf("Content-Length: %d\r\n", contentLength))
 
-	// 从原始ResponseWriter写入头信息(包括Content-Type、Accept-Ranges、Content-Range(如果设置)和PHP头)
+	// 写入响应头
 	err = originalWriter.Header().Write(bufrw)
 	if err != nil {
-		logger.Error("写入头信息到劫持连接错误", "error", err)
-		return // Cannot proceed
+		appCtx.Logger.Error("写入头信息到劫持连接错误", "error", err)
+		return
 	}
 
 	bufrw.WriteString("\r\n")
@@ -425,7 +410,7 @@ func sendFileWithSendfile(logger *slog.Logger, ctx context.Context, w *responseI
 	if isPartialRequest {
 		logAttrs = append(logAttrs, "range_start", startRange, "range_end", endRange)
 	}
-	logger.Info("通过X-Accel-Redirect使用sendfile服务文件", logAttrs...)
+	appCtx.Logger.Info("通过X-Accel-Redirect使用sendfile服务文件", logAttrs...)
 
 	srcFd := int(file.Fd())
 	dstFd := int(tcpFile.Fd())
@@ -433,41 +418,36 @@ func sendFileWithSendfile(logger *slog.Logger, ctx context.Context, w *responseI
 	bytesToSend := endRange - startRange + 1
 	sentBytes := int64(0)
 
-	// 分块发送文件，每块不超过 256KB，并应用传入的限速器（如果存在）
+	// 分块发送文件，应用限速器
 	for sentBytes < bytesToSend {
-		chunkSize := int(math.Min(float64(bytesToSend-sentBytes), float64(1<<18))) // 256k 块或剩余全部
+		chunkSize := int(math.Min(float64(bytesToSend-sentBytes), float64(1<<18))) // 最大 256KB
 
 		if limiter != nil {
-			// Wait 会阻塞直到获得令牌或上下文被取消
-			// 使用 RedisCellLimiter 的 WaitN 方法，需要 key (tokenID) 和字节数 (chunkSize)
-			// 调用新的 WaitN 签名，不再需要 tokenID
 			waitErr := limiter.WaitN(ctx, int64(chunkSize))
 			if waitErr != nil {
-				// 如果上下文被取消（例如，客户端断开连接）或发生其他错误，则停止发送
-				logger.Warn("速率限制器等待错误，停止传输", "error", waitErr)
+				appCtx.Logger.Warn("速率限制器等待错误，停止传输", "error", waitErr)
 				break
 			}
 		}
 
-		n, sendErr := syscall.Sendfile(dstFd, srcFd, nil, chunkSize) // 使用 nil 让内核自动处理文件偏移量
+		n, sendErr := syscall.Sendfile(dstFd, srcFd, nil, chunkSize)
 		if sendErr != nil {
-			// 处理 sendfile 错误（例如，连接断开）
+			// 处理 sendfile 错误
 			if se, ok := sendErr.(syscall.Errno); ok && se == syscall.EPIPE {
-				logger.Warn("Sendfile错误: 管道破裂(客户端可能已断开连接)")
+				appCtx.Logger.Warn("Sendfile错误: 管道破裂(客户端可能已断开连接)")
 			} else {
-				logger.Error("sendfile过程中错误", "error", sendErr)
+				appCtx.Logger.Error("sendfile过程中错误", "error", sendErr)
 			}
 			break
 		}
 		if n == 0 {
-			// sendfile 返回 0 通常意味着没有更多数据可发送或连接已关闭
-			logger.Info("sendfile返回0字节，假设EOF或连接已关闭")
+			appCtx.Logger.Info("sendfile返回0字节，传输完成或连接关闭")
 			break
 		}
 		sentBytes += int64(n)
 	}
 
-	logger.Info("完成sendfile传输", "path", filePath, "sent_bytes", sentBytes)
+	appCtx.Logger.Info("完成sendfile传输", "path", filePath, "sent_bytes", sentBytes)
 }
 
 type byteRange struct {
@@ -502,7 +482,7 @@ func parseRangeHeader(rangeHeader string, fileSize int64) ([]byteRange, error) {
 		var err error
 
 		if startStr == "" {
-			// 后缀范围: -N (最后N字节)
+			// 后缀范围: -N
 			if endStr == "" {
 				return nil, fmt.Errorf("invalid suffix range format: %s", r)
 			}
@@ -516,17 +496,17 @@ func parseRangeHeader(rangeHeader string, fileSize int64) ([]byteRange, error) {
 			startByte = fileSize - suffixLen
 			endByte = fileSize - 1
 		} else {
-			// 带起始的范围: M-N 或 M-
+			// 起始范围: M-N 或 M-
 			startByte, err = strconv.ParseInt(startStr, 10, 64)
 			if err != nil {
 				return nil, fmt.Errorf("invalid range start: %s", startStr)
 			}
 
 			if endStr == "" {
-				// M-: 从M到结尾
+				// M-: 到结尾
 				endByte = fileSize - 1
 			} else {
-				// M-N: 从M到N(包含)
+				// M-N: 到 N
 				endByte, err = strconv.ParseInt(endStr, 10, 64)
 				if err != nil {
 					return nil, fmt.Errorf("invalid range end: %s", endStr)
@@ -535,27 +515,26 @@ func parseRangeHeader(rangeHeader string, fileSize int64) ([]byteRange, error) {
 		}
 
 		if startByte < 0 {
-			startByte = 0 // Treat negative start as 0
+			startByte = 0
 		}
 
 		if endByte < startByte || endByte >= fileSize {
 			endByte = fileSize - 1
 		}
 
-		// 最终检查: 如果调整后起始超过结束或>=文件大小，则无法满足
+		// 调整结束位置
 		if startByte > endByte || startByte >= fileSize {
-			continue // Skip this unsatisfiable range part
+			continue
 		}
 
 		ranges = append(ranges, byteRange{start: startByte, end: endByte})
 	}
 
 	if len(ranges) == 0 {
-		// 当所有范围部分都无效/无法满足时发生
+		// 无有效范围
 		return nil, fmt.Errorf("range not satisfiable")
 	}
 
-	// 注意: 此实现不处理重叠/未排序的范围或多部分响应
-	// 如果指定了多个范围，它只处理第一个有效的范围
+	// 注意: 仅处理第一个有效范围
 	return ranges, nil
 }

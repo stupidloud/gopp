@@ -22,22 +22,20 @@ const (
 
 type RedisCellLimiter struct {
 	client   *redis.Client
-	key      string // 添加 key 字段
+	key      string
 	capacity int64
 	rate     int64
 }
 
-// NewRedisCellLimiter 现在接收 key 参数
 func NewRedisCellLimiter(client *redis.Client, key string, capacity int64, rate int64) (*RedisCellLimiter, error) {
 	return &RedisCellLimiter{
 		client:   client,
-		key:      key, // 存储 key
+		key:      key,
 		capacity: capacity,
 		rate:     rate,
 	}, nil
 }
 
-// WaitN 不再需要 key 参数
 func (l *RedisCellLimiter) WaitN(ctx context.Context, n int64) error {
 	period := int64(1)
 
@@ -54,7 +52,6 @@ func (l *RedisCellLimiter) WaitN(ctx context.Context, n int64) error {
 			return ctx.Err()
 		default:
 		}
-		// 使用存储在 limiter 实例中的 l.key
 		result, err := l.client.Do(ctx, "CL.THROTTLE", l.key, l.capacity, l.rate, period, n).Result()
 		if err != nil {
 			if redisErr, ok := err.(redis.Error); ok && strings.Contains(strings.ToLower(redisErr.Error()), "unknown command") {
@@ -130,26 +127,29 @@ func (l *RedisCellLimiter) WaitN(ctx context.Context, n int64) error {
 	}
 }
 
-// Wait 不再需要 key 参数
 func (l *RedisCellLimiter) Wait(ctx context.Context) error {
-	return l.WaitN(ctx, 1) // 调用修改后的 WaitN
+	return l.WaitN(ctx, 1)
 }
 
 var (
 	userLimitersCache     *lru.Cache
 	limiterMutex          sync.RWMutex
-	managerRedisClient    *redis.Client
 	isRedisDown           bool = false
 	redisDownSince        time.Time
 	redisStateMutex       sync.RWMutex
 	redisCooldownDuration = 5 * time.Minute
 )
 
-func InitBandwidthManager(opts *redis.Options) error {
+func InitBandwidthManager(appCtx *AppContext) error {
 	limiterMutex.Lock()
 	defer limiterMutex.Unlock()
 	var err error
 	userLimitersCache, _ = lru.New(limiterCacheSize) // Ignore error for simplicity as requested
+	opts := &redis.Options{
+		Addr:     appCtx.Config.RedisAddr,
+		Password: appCtx.Config.RedisPassword,
+		DB:       appCtx.Config.RedisDB,
+	}
 	client := redis.NewClient(opts)
 	pingCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -175,11 +175,11 @@ func InitBandwidthManager(opts *redis.Options) error {
 			_ = client.Close()
 		}
 	}
-	managerRedisClient = client
+	appCtx.RedisClient = client
 	return nil
 }
 
-func GetOrCreateLimiter(userID string, requiredByteRate int64) (*RedisCellLimiter, error) {
+func GetOrCreateLimiter(appCtx *AppContext, userID string, requiredByteRate int64) (*RedisCellLimiter, error) {
 	limiterMutex.RLock()
 	if cachedLimiter, ok := userLimitersCache.Get(userID); ok {
 		limiter, typeOk := cachedLimiter.(*RedisCellLimiter)
@@ -197,8 +197,11 @@ func GetOrCreateLimiter(userID string, requiredByteRate int64) (*RedisCellLimite
 			return limiter, nil
 		}
 	}
-	client := managerRedisClient
-	// 创建 Limiter 时传递 userID 作为 key
+	client := appCtx.RedisClient // 从 AppContext 获取 Redis 客户端
+	if client == nil {
+		// 如果 Redis 未配置或初始化失败，返回错误或默认行为
+		return nil, errors.New("redis client is not initialized in AppContext")
+	}
 	newLImiter, _ := NewRedisCellLimiter(client, userID, requiredByteRate, requiredByteRate) // Ignore error for simplicity as requested
 	userLimitersCache.Add(userID, newLImiter)
 	return newLImiter, nil

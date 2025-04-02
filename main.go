@@ -1,21 +1,25 @@
 package main
 
 import (
-	"fmt" // 需要保留 fmt 用于错误格式化
+	"fmt"
 	"log/slog"
 	"net/http"
-	"os"      // 需要 os.Stdout 和 os.Exit
-	"strings" // 用于日志级别字符串处理
+	"os"
+	"strings"
 	"time"
 
-	"github.com/go-redis/redis/v8" // 引入 redis 客户端
+	"github.com/go-redis/redis/v8"
 
 	"github.com/yookoala/gofast"
 )
 
-// 全局配置变量（如果愿意，可考虑显式传递）
-var config Config
-var logger *slog.Logger // 全局 logger 实例
+// AppContext 包含应用程序运行所需的共享依赖项
+type AppContext struct {
+	Config      Config
+	Logger      *slog.Logger
+	ConnFactory gofast.ConnFactory
+	RedisClient *redis.Client
+}
 
 // parseLogLevel 将字符串日志级别转换为 slog.Level
 func parseLogLevel(levelStr string) slog.Level {
@@ -37,89 +41,64 @@ func parseLogLevel(levelStr string) slog.Level {
 
 func main() {
 	var err error
-	config, err = loadConfig("config.yaml")
+	appCtx := &AppContext{}
+	appCtx.Config, err = loadConfig("config.yaml")
 	if err != nil {
-		// loadConfig 现在在文件未找到时返回默认配置，
-		// 因此此错误可能是解析问题导致的。
-		// 使用 fmt 输出到 stderr，因为 logger 可能尚未初始化
+		// 如果加载或解析 config.yaml 失败，记录警告并使用默认配置
 		fmt.Fprintf(os.Stderr, "警告：无法加载或解析 config.yaml：%v。使用默认配置。\n", err)
-		// 当loadConfig返回错误时，config已经包含defaultConfig
 	}
 
-	// --- 初始化日志 ---
-	logLevel := parseLogLevel(config.LogLevel)
-	// 使用 TextHandler 输出到标准输出，可以根据需要换成 JSONHandler 或其他 Handler
+	// 初始化日志
+	logLevel := parseLogLevel(appCtx.Config.LogLevel)
 	logHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})
-	logger = slog.New(logHandler)
-	// 可选：设置标准 log 包使用 slog (如果仍有地方直接用 log)
-	// log.SetOutput(logger.Writer())
-	// log.SetFlags(0) // slog 会处理时间戳等
+	appCtx.Logger = slog.New(logHandler)
 
-	logger.Info("日志系统初始化完成", "level", logLevel.String())
-	// --- 日志初始化完成 ---
+	appCtx.Logger.Info("日志系统初始化完成", "level", logLevel.String())
 
-	readTimeout := time.Duration(config.ReadTimeoutSeconds) * time.Second
-	writeTimeout := time.Duration(config.WriteTimeoutSeconds) * time.Second
-	idleTimeout := time.Duration(config.IdleTimeoutSeconds) * time.Second
+	readTimeout := time.Duration(appCtx.Config.ReadTimeoutSeconds) * time.Second
+	writeTimeout := time.Duration(appCtx.Config.WriteTimeoutSeconds) * time.Second
+	idleTimeout := time.Duration(appCtx.Config.IdleTimeoutSeconds) * time.Second
 
-	logger.Info("启动 HTTP 代理服务器", "address", config.ListenAddr)
-	logger.Info("后端 PHP-FPM", "network", config.FPMNetwork, "address", config.FPMAddress)
-	logger.Info("文档根目录", "path", config.DocRoot)
-	logger.Info("X-Accel 根目录", "path", config.AccelRoot)
-	logger.Info("主 PHP 文件", "file", config.MainPHPFile) // 记录正在使用的主 PHP 文件
+	appCtx.Logger.Info("启动 HTTP 代理服务器", "address", appCtx.Config.ListenAddr)
+	appCtx.Logger.Info("后端 PHP-FPM", "network", appCtx.Config.FPMNetwork, "address", appCtx.Config.FPMAddress)
+	appCtx.Logger.Info("文档根目录", "path", appCtx.Config.DocRoot)
+	appCtx.Logger.Info("X-Accel 根目录", "path", appCtx.Config.AccelRoot)
+	appCtx.Logger.Info("主 PHP 文件", "file", appCtx.Config.MainPHPFile)
 
-	connFactory := gofast.SimpleConnFactory(config.FPMNetwork, config.FPMAddress)
+	appCtx.ConnFactory = gofast.SimpleConnFactory(appCtx.Config.FPMNetwork, appCtx.Config.FPMAddress)
 
-	// --- 初始化带宽管理器 ---
-	if config.RedisBackend {
-		logger.Info("配置使用 Redis 后端进行带宽限制")
-		redisOpts := &redis.Options{
-			Addr:     config.RedisAddr,
-			Password: config.RedisPassword,
-			DB:       config.RedisDB,
-		}
-		err := InitBandwidthManager(redisOpts)
+	// 初始化带宽管理器 (如果配置了 Redis)
+	if appCtx.Config.RedisBackend {
+		appCtx.Logger.Info("配置使用 Redis 后端进行带宽限制")
+		err := InitBandwidthManager(appCtx)
 		if err != nil {
-			logger.Error("无法初始化 Redis 带宽管理器", "error", err)
+			appCtx.Logger.Error("无法初始化 Redis 带宽管理器", "error", err)
 			os.Exit(1) // 初始化失败则退出
 		} else {
-			logger.Info("成功初始化 Redis 带宽管理器")
+			appCtx.Logger.Info("成功初始化 Redis 带宽管理器")
 		}
 	} else {
-		logger.Info("未配置 Redis 后端，带宽限制功能将不可用")
-		// 注意：如果未配置 Redis，GetOrCreateLimiter 将无法工作，
-		// handler 中需要处理 managerRedisClient 为 nil 的情况，
-		// 或者在此处提供一个空操作的 Limiter 实现。
-		// 当前 bandwidth_manager 实现会在未初始化时 panic 或返回错误。
-		// 为了简单起见，如果未配置 Redis，我们假设不需要带宽限制。
+		appCtx.Logger.Info("未配置 Redis 后端，带宽限制功能将不可用")
+		// 注意：如果未配置 Redis，带宽限制功能将不可用。
+		// GetOrCreateLimiter 在 Redis 未初始化时会返回错误。
 	}
-	// --- 带宽管理器初始化完毕 ---
 
-	// 注意：createPHPHandler 不再需要 manager 参数
-	phpHandler := createPHPHandler(
-		logger,
-		connFactory,
-		config.DocRoot,
-		config.AccelRoot,
-		config.MainPHPFile,
-		// 移除 tokenManager
-		config.TrustedProxies,
-	)
+	phpHandler := createPHPHandler(appCtx)
 
 	server := &http.Server{
-		Addr:         config.ListenAddr,
+		Addr:         appCtx.Config.ListenAddr,
 		Handler:      phpHandler,
 		ReadTimeout:  readTimeout,
 		WriteTimeout: writeTimeout,
 		IdleTimeout:  idleTimeout,
 	}
 
-	logger.Info("服务器启动中...")
+	appCtx.Logger.Info("服务器启动中...")
 	err = server.ListenAndServe()
 	if err != nil && err != http.ErrServerClosed {
-		logger.Error("无法在指定地址监听", "address", config.ListenAddr, "error", err)
-		os.Exit(1) // 替换 log.Fatalf
+		appCtx.Logger.Error("无法在指定地址监听", "address", appCtx.Config.ListenAddr, "error", err)
+		os.Exit(1)
 	}
 
-	logger.Info("服务器已优雅停止")
+	appCtx.Logger.Info("服务器已优雅停止")
 }
