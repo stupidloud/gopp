@@ -4,7 +4,17 @@ import (
 	"fmt"
 	"os"
 
+	"log/slog"
+
 	"gopkg.in/yaml.v3"
+)
+
+// 定义日志级别常量
+const (
+	LevelDebug = slog.LevelDebug
+	LevelInfo  = slog.LevelInfo
+	LevelWarn  = slog.LevelWarn
+	LevelError = slog.LevelError
 )
 
 type Config struct {
@@ -27,7 +37,7 @@ type Config struct {
 	RedisKeyPrefix string `yaml:"redis_key_prefix"`
 	RedisKeyTTL    int    `yaml:"redis_key_ttl"`
 
-	LogLevel string `yaml:"log_level"`
+	LogLevel slog.Level `yaml:"log_level"`
 }
 
 var defaultConfig = Config{
@@ -40,6 +50,7 @@ var defaultConfig = Config{
 	WriteTimeoutSeconds: 0,
 	IdleTimeoutSeconds:  0,
 	MainPHPFile:         "index.php",
+	TrustedProxies:      []string{}, // 初始化为空切片而非nil
 
 	// Redis默认配置
 	RedisBackend:   false,
@@ -48,33 +59,31 @@ var defaultConfig = Config{
 	RedisDB:        0,
 	RedisKeyPrefix: "gopp:rate:",
 	RedisKeyTTL:    3600,
+	LogLevel:       LevelInfo, // 默认日志级别
 }
 
 func loadConfig(path string) (Config, error) {
 	config := defaultConfig
+
+	// 如果配置文件不存在，直接返回默认配置
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return config, nil
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
-		// 如果文件不存在，无错误地返回默认配置
-		if os.IsNotExist(err) {
-			return config, nil
-		}
 		return config, fmt.Errorf("failed to read config file %s: %w", path, err)
 	}
-	err = yaml.Unmarshal(data, &config)
-	if err != nil {
-		// 如果日志级别未设置，默认设为info
-		if config.LogLevel == "" {
-			config.LogLevel = "info"
-		}
+
+	// 直接解析到config结构体
+	if err := yaml.Unmarshal(data, &config); err != nil {
 		return config, fmt.Errorf("failed to unmarshal config file %s: %w", path, err)
 	}
-	// 确保MainPHPFile有默认值，以防配置文件中未设置
+
+	// 处理特殊字段
 	if config.MainPHPFile == "" {
 		config.MainPHPFile = defaultConfig.MainPHPFile
 	}
-	// 处理trusted_proxies字段，若未设置则为空切片
-	if config.TrustedProxies == nil {
-		config.TrustedProxies = []string{}
-	}
+
 	return config, nil
 }

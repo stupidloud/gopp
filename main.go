@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -21,24 +20,6 @@ type AppContext struct {
 	RedisClient *redis.Client
 }
 
-// parseLogLevel 将字符串日志级别转换为 slog.Level
-func parseLogLevel(levelStr string) slog.Level {
-	switch strings.ToLower(levelStr) {
-	case "debug":
-		return slog.LevelDebug
-	case "info":
-		return slog.LevelInfo
-	case "warn", "warning":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		// 如果配置无效，默认使用 Info 级别并打印警告
-		fmt.Fprintf(os.Stderr, "警告：无效的日志级别 '%s'，将使用 'info' 级别\n", levelStr)
-		return slog.LevelInfo
-	}
-}
-
 func main() {
 	var err error
 	appCtx := &AppContext{}
@@ -49,11 +30,10 @@ func main() {
 	}
 
 	// 初始化日志
-	logLevel := parseLogLevel(appCtx.Config.LogLevel)
-	logHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})
+	logHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: appCtx.Config.LogLevel})
 	appCtx.Logger = slog.New(logHandler)
 
-	appCtx.Logger.Info("日志系统初始化完成", "level", logLevel.String())
+	appCtx.Logger.Info("日志系统初始化完成", "level", appCtx.Config.LogLevel.String())
 
 	readTimeout := time.Duration(appCtx.Config.ReadTimeoutSeconds) * time.Second
 	writeTimeout := time.Duration(appCtx.Config.WriteTimeoutSeconds) * time.Second
