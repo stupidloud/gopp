@@ -101,6 +101,8 @@ func TestTryFiles(t *testing.T) {
 	e.writeFile(e.docRoot, "index.php", "<?php SECRET_SOURCE")
 	e.writeFile(e.docRoot, "static.txt", "hello static")
 	e.writeFile(e.docRoot, "sub/a.txt", "sub file")
+	e.writeFile(e.docRoot, "sub/page.php", "")
+	e.writeFile(e.docRoot, "dir.php/x", "")
 	mainScript := "php:" + filepath.Join(e.docRoot, "index.php")
 
 	tests := []struct {
@@ -116,6 +118,10 @@ func TestTryFiles(t *testing.T) {
 		{"不存在的路径交给 PHP", "GET", "/no/such/route", 200, mainScript},
 		{"路径中间是文件交给 PHP", "GET", "/static.txt/x", 200, mainScript},
 		{"PHP 脚本", "GET", "/index.php", 200, mainScript},
+		{"子目录 PHP 脚本", "GET", "/sub/page.php", 200, "php:" + filepath.Join(e.docRoot, "sub/page.php")},
+		{"PHP 脚本不存在返回 404", "GET", "/missing.php", 404, "Not Found\n"},
+		{"以 .php 结尾的目录返回 404", "GET", "/dir.php", 404, "Not Found\n"},
+		{"越界的 PHP 路径被限制在 doc_root 内", "GET", "/../../etc/x.php", 404, "Not Found\n"},
 		// 以下路径清理后指向 index.php，不得作为静态文件返回源码
 		{"末尾斜杠不泄露源码", "GET", "/index.php/", 200, mainScript},
 		{"末尾点不泄露源码", "GET", "/index.php/.", 200, mainScript},

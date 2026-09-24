@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -86,38 +87,54 @@ func secureJoinPath(basePath, requestedPath string) (string, error) {
 	return cleanTargetPath, nil
 }
 
-// phpScriptRouterSessionHandler 是一个 gofast.SessionHandler 中间件，
-// 用于根据请求路径动态设置 SCRIPT_FILENAME 和 SCRIPT_NAME。
+// phpScript 是本次请求要执行的 PHP 脚本
+type phpScript struct {
+	filename string // SCRIPT_FILENAME
+	name     string // SCRIPT_NAME
+}
+
+type phpScriptKey struct{}
+
+// resolvePHPScript 确定要执行的 PHP 脚本：请求路径以 .php 结尾时执行该脚本，否则执行主入口。
+// 在进入 gofast 之前完成，出错时返回对应的 HTTP 状态码（gofast 会把 SessionHandler 的错误一律变成 500）。
+func resolvePHPScript(appCtx *AppContext, requestPath string) (phpScript, int) {
+	requestPath = path.Clean("/" + requestPath)
+	if !strings.HasSuffix(requestPath, ".php") {
+		return phpScript{
+			filename: filepath.Join(appCtx.Config.DocRoot, appCtx.Config.MainPHPFile),
+			name:     "/" + appCtx.Config.MainPHPFile,
+		}, 0
+	}
+
+	scriptPath, err := secureJoinPath(appCtx.Config.DocRoot, requestPath)
+	if err != nil {
+		appCtx.Logger.Warn("安全路径检查失败", "requested_path", requestPath, "doc_root", appCtx.Config.DocRoot, "error", err)
+		return phpScript{}, http.StatusForbidden
+	}
+	fi, err := os.Stat(scriptPath)
+	switch {
+	case err == nil && !fi.IsDir():
+		return phpScript{filename: scriptPath, name: requestPath}, 0
+	case err == nil, os.IsNotExist(err), errors.Is(err, syscall.ENOTDIR):
+		appCtx.Logger.Debug("请求的 .php 文件不存在", "requested_path", requestPath)
+		return phpScript{}, http.StatusNotFound
+	case os.IsPermission(err):
+		appCtx.Logger.Warn("无权访问请求的 .php 文件", "path", scriptPath, "error", err)
+		return phpScript{}, http.StatusForbidden
+	default:
+		appCtx.Logger.Error("检查请求的 .php 文件时出错", "path", scriptPath, "error", err)
+		return phpScript{}, http.StatusInternalServerError
+	}
+}
+
+// phpScriptRouterSessionHandler 按 resolvePHPScript 的结果设置 SCRIPT_FILENAME 和 SCRIPT_NAME
 func phpScriptRouterSessionHandler(appCtx *AppContext) func(inner gofast.SessionHandler) gofast.SessionHandler {
 	return func(inner gofast.SessionHandler) gofast.SessionHandler {
 		return func(client gofast.Client, req *gofast.Request) (*gofast.ResponsePipe, error) {
-			requestPath := req.Raw.URL.Path
-			scriptToExecute := appCtx.Config.MainPHPFile
-			scriptName := "/" + appCtx.Config.MainPHPFile
-
-			if strings.HasSuffix(requestPath, ".php") {
-				cleanTargetPath, err := secureJoinPath(appCtx.Config.DocRoot, requestPath)
-				if err != nil {
-					appCtx.Logger.Warn("安全路径检查失败", "requested_path", requestPath, "doc_root", appCtx.Config.DocRoot, "error", err)
-					return nil, fmt.Errorf("forbidden: invalid or disallowed path %s", requestPath)
-				}
-				requestedScriptPath := cleanTargetPath
-
-				if _, err := os.Stat(requestedScriptPath); err == nil {
-					scriptToExecute = requestPath
-					scriptName = requestPath
-				} else if os.IsNotExist(err) {
-					appCtx.Logger.Debug("请求的 .php 文件不存在", "requested_path", requestPath)
-					return nil, fmt.Errorf("not found: script %s not found", requestPath)
-				} else {
-					appCtx.Logger.Error("检查请求的 .php 文件时出错", "path", requestedScriptPath, "error", err)
-					return nil, fmt.Errorf("internal server error checking script %s", requestPath)
-				}
-			}
-
-			req.Params["SCRIPT_FILENAME"] = filepath.Join(appCtx.Config.DocRoot, scriptToExecute)
-			req.Params["SCRIPT_NAME"] = scriptName
-			appCtx.Logger.Debug("PHP 脚本路由", "script_filename", req.Params["SCRIPT_FILENAME"], "script_name", req.Params["SCRIPT_NAME"])
+			script := req.Raw.Context().Value(phpScriptKey{}).(phpScript)
+			req.Params["SCRIPT_FILENAME"] = script.filename
+			req.Params["SCRIPT_NAME"] = script.name
+			appCtx.Logger.Debug("PHP 脚本路由", "script_filename", script.filename, "script_name", script.name)
 
 			return inner(client, req)
 		}
@@ -165,6 +182,13 @@ func createPHPHandler(appCtx *AppContext) http.Handler {
 		if handleTryFiles(appCtx, w, r) {
 			return
 		}
+
+		script, status := resolvePHPScript(appCtx, r.URL.Path)
+		if status != 0 {
+			http.Error(w, http.StatusText(status), status)
+			return
+		}
+		r = r.WithContext(context.WithValue(r.Context(), phpScriptKey{}, script))
 
 		rw := &responseInterceptor{
 			ResponseWriter: w,
