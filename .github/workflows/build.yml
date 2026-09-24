@@ -2,6 +2,7 @@ name: Manual Go Build
 on:
   workflow_dispatch:
 jobs:
+  # 默认版：连接外部 PHP-FPM，纯 Go 静态编译
   build:
     runs-on: ubuntu-latest
     outputs:
@@ -26,46 +27,38 @@ jobs:
       run: CGO_ENABLED=0 go build -v -trimpath -ldflags="-s -w" -o gopp .
     - name: Upload artifact to litterbox
       id: upload_step
-      run: |
-        # 压缩二进制文件
-        echo "Compressing gopp binary..."
-        gzip -c ./gopp > gopp.gz
+      run: .github/scripts/upload.sh gopp
 
-        # 上传到 litterbox（catbox 的临时文件服务，保留 72 小时）并捕获 URL
-        echo "Uploading gopp.gz to litterbox..."
-        UPLOAD_URL=$(curl -sS --fail --retry 3 -F reqtype=fileupload -F time=72h -F "fileToUpload=@gopp.gz" \
-          https://litterbox.catbox.moe/resources/internals/api.php)
-
-        # 返回的不是链接（如服务关闭时返回的说明文字）则失败
-        case "$UPLOAD_URL" in
-          https://*) ;;
-          *) echo "::error::上传失败，返回：$UPLOAD_URL"; exit 1 ;;
-        esac
-        echo "Uploaded to: $UPLOAD_URL"
-
-        # 设置步骤输出变量
-        echo "artifact_url=$UPLOAD_URL" >> $GITHUB_OUTPUT
-
-        # 添加到工作流摘要
-        echo "### 构建产物下载链接 :rocket:" >> $GITHUB_STEP_SUMMARY
-        echo "构建产物下载链接（72 小时内有效）: $UPLOAD_URL" >> $GITHUB_STEP_SUMMARY
-
-  # 内嵌 PHP 版（-tags frankenphp）：只做 vet 与测试，产物以 Dockerfile 构建镜像的方式交付
-  test-embed:
+  # 内嵌 PHP 的单文件版（build-static.sh）
+  build-static:
     runs-on: ubuntu-latest
-    container: dunglas/frankenphp:1.12.7-builder-php8.4
+    outputs:
+      artifact_url: ${{ steps.upload_step.outputs.artifact_url }}
     services:
       redis:
         image: redis:7
-    env:
-      GOPP_TEST_REDIS: redis:6379
-      GOFLAGS: -buildvcs=false
-      CGO_ENABLED: 1
+        ports:
+          - 6379:6379
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    - name: Vet and test
-      run: |
-        export CGO_CFLAGS="$(php-config --includes)" CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)"
-        go vet -tags frankenphp,nowatcher,nomercure ./...
-        go test -race -tags frankenphp,nowatcher,nomercure ./...
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+    - name: Cache static-php-cli
+      uses: actions/cache@v4
+      with:
+        # 只缓存编译结果，源码与下载包太大
+        path: |
+          .spc/spc
+          .spc/buildroot
+          .spc/libphp.stamp
+        key: spc-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build-static.sh') }}
+    - name: Test
+      run: ./build-static.sh test
+    - name: Build
+      run: ./build-static.sh
+    - name: Upload artifact to litterbox
+      id: upload_step
+      run: .github/scripts/upload.sh gopp-static

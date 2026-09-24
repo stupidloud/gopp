@@ -26,6 +26,7 @@ func newPHPBackend(appCtx *AppContext) (phpBackend, error) {
 	opts := []frankenphp.Option{
 		frankenphp.WithLogger(appCtx.Logger),
 		frankenphp.WithNumThreads(cfg.PHPThreads),
+		frankenphp.WithPhpIni(cfg.PHPIni),
 	}
 	b := &embedBackend{appCtx: appCtx}
 	if cfg.PHPWorkerFile != "" {

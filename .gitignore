@@ -3,4 +3,5 @@
 /gopp
 /*.md
 !/README.md
-/gopp-embed
+/gopp-static
+/.spc/

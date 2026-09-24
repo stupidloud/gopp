@@ -25,6 +25,7 @@ func newEmbedEnv(t *testing.T, workerFile string, files map[string]string) (*App
 	cfg.PHPThreads = 4
 	cfg.PHPWorkerFile = workerFile
 	cfg.PHPWorkerNum = 1
+	cfg.PHPIni = map[string]string{"memory_limit": "77M"}
 	if err := cfg.prepare(); err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +79,7 @@ $out = [];
 foreach ($keys as $k) { $out[$k] = $_SERVER[$k] ?? null; }
 $out['cookie'] = $_COOKIE;
 $out['post'] = $_POST;
+$out['memory_limit'] = ini_get('memory_limit');
 echo json_encode($out);
 `
 
@@ -124,6 +126,12 @@ func TestEmbedPHP(t *testing.T) {
 			if m[k] != v {
 				t.Errorf("%s = %v，期望 %v", k, m[k], v)
 			}
+		}
+	})
+
+	t.Run("php_ini 覆盖 php.ini", func(t *testing.T) {
+		if m := get("/", nil, nil); m["memory_limit"] != "77M" {
+			t.Errorf("memory_limit = %v", m["memory_limit"])
 		}
 	})
 
