@@ -9,10 +9,9 @@ import (
 	"os"
 	"strings"
 	"syscall"
-	"time"
 )
 
-// accelChunkSize 是每次限速等待和刷新写超时的最大块大小
+// accelChunkSize 是每次限速等待的最大块大小
 const accelChunkSize = 256 << 10
 
 // serveAccel 处理 X-Accel-Redirect：由 http.ServeContent 负责 Range / 多段 Range / If-Range /
@@ -68,8 +67,6 @@ func serveAccel(appCtx *AppContext, w http.ResponseWriter, r *http.Request, rw *
 		ResponseWriter: w,
 		ctx:            r.Context(),
 		chunk:          accelChunkSize,
-		rc:             http.NewResponseController(w),
-		timeout:        time.Duration(appCtx.Config.SendTimeoutSeconds) * time.Second,
 	}
 	// 指定了 token 时同一 token 的所有连接共享速率，否则只限制本连接
 	if lim := appCtx.Limiters.Get(rw.accelTokenID, rw.accelLimitBytes); lim != nil {
@@ -77,11 +74,6 @@ func serveAccel(appCtx *AppContext, w http.ResponseWriter, r *http.Request, rw *
 		// 约 100ms 一块使速率平滑
 		tw.chunk = max(1, min(accelChunkSize, rw.accelLimitBytes/10))
 	}
-	if tw.timeout > 0 {
-		// 写超时每块刷新；结束后清除，否则会影响该 keep-alive 连接上的后续请求
-		defer tw.rc.SetWriteDeadline(time.Time{})
-	}
-
 	logger.Info("通过 X-Accel-Redirect 发送文件", "path", filePath, "range", r.Header.Get("Range"),
 		"token_id", rw.accelTokenID, "limit_bytes", rw.accelLimitBytes)
 	http.ServeContent(tw, r, fi.Name(), fi.ModTime(), f)
@@ -94,15 +86,13 @@ func accelError(w http.ResponseWriter, code int) {
 	http.Error(w, http.StatusText(code), code)
 }
 
-// throttledWriter 在写入前按块等待限速器，并在每块前刷新写超时（只防慢客户端，不限制总时长）。
+// throttledWriter 在写入前按块等待限速器。
 // 实现 ReadFrom 以保留 sendfile 零拷贝路径。
 type throttledWriter struct {
 	http.ResponseWriter
 	ctx     context.Context
 	lim     Limiter // nil 表示不限速
 	chunk   int
-	rc      *http.ResponseController
-	timeout time.Duration
 	written int64
 }
 
@@ -111,15 +101,10 @@ func (t *throttledWriter) Unwrap() http.ResponseWriter {
 }
 
 func (t *throttledWriter) wait(n int) error {
-	if t.lim != nil {
-		if err := t.lim.WaitN(t.ctx, n); err != nil {
-			return err
-		}
+	if t.lim == nil {
+		return nil
 	}
-	if t.timeout > 0 {
-		_ = t.rc.SetWriteDeadline(time.Now().Add(t.timeout))
-	}
-	return nil
+	return t.lim.WaitN(t.ctx, n)
 }
 
 // ReadFrom 必须拆开 *io.LimitedReader：io.CopyN 会再套一层，而 TCPConn 只认

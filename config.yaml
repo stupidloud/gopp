@@ -7,7 +7,6 @@ accel_root: "/srv/protected_files"       # X - Accel - Redirect文件的根目�
 read_timeout_seconds: 15      # HTTP服务器读取超时时间（秒）
 write_timeout_seconds: 0     # HTTP服务器写入超时时间（秒）
 idle_timeout_seconds: 0     # HTTP服务器空闲超时时间（秒）
-send_timeout_seconds: 60      # X-Accel 下载时单次写入的超时（秒），每块刷新，只防慢客户端、不限制总时长；0 = 不限
 main_php_file: index.php
 trusted_proxies:
   - 10.0.0.0/8
