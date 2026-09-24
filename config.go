@@ -28,6 +28,7 @@ type Config struct {
 	ReadTimeoutSeconds  int      `yaml:"read_timeout_seconds"`
 	WriteTimeoutSeconds int      `yaml:"write_timeout_seconds"`
 	IdleTimeoutSeconds  int      `yaml:"idle_timeout_seconds"`
+	SendTimeoutSeconds  int      `yaml:"send_timeout_seconds"`
 	MainPHPFile         string   `yaml:"main_php_file"`
 	TrustedProxies      []string `yaml:"trusted_proxies"`
 
@@ -53,6 +54,7 @@ var defaultConfig = Config{
 	ReadTimeoutSeconds:  15,
 	WriteTimeoutSeconds: 0,
 	IdleTimeoutSeconds:  0,
+	SendTimeoutSeconds:  60,
 	MainPHPFile:         "index.php",
 	TrustedProxies:      []string{}, // 初始化为空切片而非nil
 
