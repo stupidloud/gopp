@@ -156,7 +156,6 @@ func createPHPHandler(appCtx *AppContext) http.Handler {
 	phpSessionHandler := gofast.Chain(
 		gofast.BasicParamsMap,                   // 基本 CGI 参数
 		gofast.MapHeader,                        // HTTP 请求头
-		gofast.MapRemoteHost,                    // REMOTE_HOST
 		basicFastCGISetupSessionHandler(appCtx), // 设置 DOCUMENT_ROOT, REMOTE_ADDR 等
 		phpScriptRouterSessionHandler(appCtx),   // 设置 SCRIPT_FILENAME, SCRIPT_NAME
 	)(gofast.BasicSession) // 处理 FastCGI 通信
