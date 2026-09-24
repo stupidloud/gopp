@@ -2,13 +2,10 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
-	"syscall"
 )
 
 // accelChunkSize 是每次限速等待的最大块大小
@@ -21,20 +18,14 @@ const accelChunkSize = 256 << 10
 func serveAccel(appCtx *AppContext, w http.ResponseWriter, r *http.Request, rw *responseInterceptor) {
 	logger := appCtx.Logger
 
-	filePath, err := secureJoinPath(appCtx.Config.AccelRoot, rw.accelPath)
+	filePath := rw.accelPath
+	f, err := openInRoot(appCtx.Config.AccelRoot, filePath)
 	if err != nil {
-		logger.Warn("X-Accel-Redirect 安全路径检查失败", "accel_path", rw.accelPath, "accel_root", appCtx.Config.AccelRoot, "error", err)
-		accelError(w, http.StatusForbidden)
-		return
-	}
-
-	f, err := os.Open(filePath)
-	if err != nil {
-		if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
-			logger.Warn("X-Accel-Redirect 文件未找到", "path", filePath)
+		if isNotFound(err) {
+			logger.Warn("X-Accel-Redirect 文件未找到", "accel_path", filePath)
 			accelError(w, http.StatusNotFound)
 		} else {
-			logger.Error("打开 X-Accel-Redirect 文件出错", "path", filePath, "error", err)
+			logger.Warn("拒绝访问 X-Accel-Redirect 文件", "accel_path", filePath, "accel_root", appCtx.Config.AccelRoot, "error", err)
 			accelError(w, http.StatusForbidden)
 		}
 		return

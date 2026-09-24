@@ -136,3 +136,51 @@ func TestTryFiles(t *testing.T) {
 		})
 	}
 }
+
+// 软链接：指向根目录内的相对软链接可用；指向根目录外或使用绝对路径的软链接一律拒绝
+func TestSymlinkEscape(t *testing.T) {
+	e := newTestEnv(t, accelPHP)
+	outside := t.TempDir()
+	e.writeFile(outside, "secret.txt", "SECRET")
+	e.writeFile(outside, "secret.php", "")
+	e.writeFile(e.docRoot, "real/a.txt", "inside")
+	e.writeFile(e.docRoot, "real/b.php", "")
+	e.writeFile(e.docRoot, "index.php", "")
+	e.writeFile(e.accelRoot, "real/f.bin", "file")
+
+	symlink := func(target, link string) {
+		t.Helper()
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	symlink("real", filepath.Join(e.docRoot, "rel"))                               // 根内、相对
+	symlink(filepath.Join(e.docRoot, "real"), filepath.Join(e.docRoot, "abs"))     // 根内、绝对
+	symlink(outside, filepath.Join(e.docRoot, "out"))                              // 根外
+	symlink("real", filepath.Join(e.accelRoot, "rel"))                             // 根内、相对
+	symlink(outside, filepath.Join(e.accelRoot, "out"))                            // 根外
+	symlink(filepath.Join(e.accelRoot, "real"), filepath.Join(e.accelRoot, "abs")) // 根内、绝对
+
+	tests := []struct {
+		name, target string
+		wantStatus   int
+		wantBody     string
+	}{
+		{"静态：根内相对软链接", "/rel/a.txt", 200, "inside"},
+		{"静态：根内绝对软链接", "/abs/a.txt", 403, "Forbidden\n"},
+		{"静态：根外软链接", "/out/secret.txt", 403, "Forbidden\n"},
+		{"PHP：根内相对软链接", "/rel/b.php", 200, "php:" + filepath.Join(e.docRoot, "rel/b.php")},
+		{"PHP：根外软链接", "/out/secret.php", 403, "Forbidden\n"},
+		{"X-Accel：根内相对软链接", "/?f=/rel/f.bin", 200, "file"},
+		{"X-Accel：根内绝对软链接", "/?f=/abs/f.bin", 403, "Forbidden\n"},
+		{"X-Accel：根外软链接", "/?f=/out/secret.txt", 403, "Forbidden\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, body := e.do("GET", tt.target, nil)
+			if resp.StatusCode != tt.wantStatus || body != tt.wantBody {
+				t.Errorf("GET %s = %d %q，期望 %d %q", tt.target, resp.StatusCode, body, tt.wantStatus, tt.wantBody)
+			}
+		})
+	}
+}

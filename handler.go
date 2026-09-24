@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
+	"io/fs"
 	"net/http"
 	"net/netip"
 	"os"
@@ -60,31 +60,19 @@ func isTrustedProxy(ip netip.Addr, trustedProxies []netip.Prefix) bool {
 	return false
 }
 
-// secureJoinPath 安全地将基础路径和请求路径连接起来，并检查结果路径是否在基础路径内。
-// 返回清理后的绝对路径或错误（如果路径无效或在基础路径之外）。
-func secureJoinPath(basePath, requestedPath string) (string, error) {
-	// 基础路径必须是绝对路径才能进行可靠的比较
-	cleanBasePath, err := filepath.Abs(basePath)
-	if err != nil {
-		return "", fmt.Errorf("无法获取基础路径的绝对路径 '%s': %w", basePath, err)
+// openInRoot 打开 root 下的 urlPath（以 "/" 分隔），不允许逃逸出 root：
+// 跟随软链接，但指向 root 之外或使用绝对路径的软链接会报错（os.Root 语义，基于 openat，无 TOCTOU）
+func openInRoot(root, urlPath string) (*os.File, error) {
+	rel := strings.TrimPrefix(path.Clean("/"+urlPath), "/")
+	if rel == "" {
+		rel = "."
 	}
+	return os.OpenInRoot(root, filepath.FromSlash(rel))
+}
 
-	targetPath := filepath.Join(cleanBasePath, requestedPath)
-	targetPath = filepath.Clean(targetPath)
-
-	// 获取目标路径的绝对路径（这也有助于清理 ".." 等）
-	cleanTargetPath, err := filepath.Abs(targetPath)
-	if err != nil {
-		return "", fmt.Errorf("无法获取目标路径的绝对路径 '%s': %w", targetPath, err)
-	}
-
-	// 安全检查：确保清理后的目标路径仍然在清理后的基础路径之下
-	// 注意：使用 filepath.Separator 确保跨平台兼容性
-	if !strings.HasPrefix(cleanTargetPath, cleanBasePath+string(filepath.Separator)) && cleanTargetPath != cleanBasePath {
-		return "", fmt.Errorf("禁止访问路径 '%s' (解析为 '%s')，因为它在允许的基础目录 '%s' 之外", requestedPath, cleanTargetPath, cleanBasePath)
-	}
-
-	return cleanTargetPath, nil
+// isNotFound 判断是否为"不存在"类错误；ENOTDIR 如 /robots.txt/x，路径中间某段是文件
+func isNotFound(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }
 
 // phpScript 是本次请求要执行的 PHP 脚本
@@ -106,25 +94,28 @@ func resolvePHPScript(appCtx *AppContext, requestPath string) (phpScript, int) {
 		}, 0
 	}
 
-	scriptPath, err := secureJoinPath(appCtx.Config.DocRoot, requestPath)
+	f, err := openInRoot(appCtx.Config.DocRoot, requestPath)
 	if err != nil {
-		appCtx.Logger.Warn("安全路径检查失败", "requested_path", requestPath, "doc_root", appCtx.Config.DocRoot, "error", err)
+		if isNotFound(err) {
+			appCtx.Logger.Debug("请求的 .php 文件不存在", "requested_path", requestPath)
+			return phpScript{}, http.StatusNotFound
+		}
+		appCtx.Logger.Warn("拒绝访问请求的 .php 文件", "requested_path", requestPath, "error", err)
 		return phpScript{}, http.StatusForbidden
 	}
-	fi, err := os.Stat(scriptPath)
-	switch {
-	case err == nil && !fi.IsDir():
-		return phpScript{filename: scriptPath, name: requestPath}, 0
-	case err == nil, os.IsNotExist(err), errors.Is(err, syscall.ENOTDIR):
-		appCtx.Logger.Debug("请求的 .php 文件不存在", "requested_path", requestPath)
-		return phpScript{}, http.StatusNotFound
-	case os.IsPermission(err):
-		appCtx.Logger.Warn("无权访问请求的 .php 文件", "path", scriptPath, "error", err)
-		return phpScript{}, http.StatusForbidden
-	default:
-		appCtx.Logger.Error("检查请求的 .php 文件时出错", "path", scriptPath, "error", err)
+	fi, err := f.Stat()
+	f.Close()
+	if err != nil {
+		appCtx.Logger.Error("检查请求的 .php 文件时出错", "requested_path", requestPath, "error", err)
 		return phpScript{}, http.StatusInternalServerError
 	}
+	if fi.IsDir() {
+		return phpScript{}, http.StatusNotFound
+	}
+	return phpScript{
+		filename: filepath.Join(appCtx.Config.DocRoot, filepath.FromSlash(requestPath)),
+		name:     requestPath,
+	}, 0
 }
 
 // phpScriptRouterSessionHandler 按 resolvePHPScript 的结果设置 SCRIPT_FILENAME 和 SCRIPT_NAME
@@ -215,28 +206,32 @@ func handleTryFiles(appCtx *AppContext, w http.ResponseWriter, r *http.Request) 
 		return false
 	}
 
-	filePath := filepath.Join(appCtx.Config.DocRoot, filepath.FromSlash(requestPath))
-
-	fileInfo, err := os.Stat(filePath)
+	f, err := openInRoot(appCtx.Config.DocRoot, requestPath)
 	if err != nil {
-		// ENOTDIR：如 /robots.txt/x，路径中间某段是文件
-		if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
+		if isNotFound(err) {
 			appCtx.Logger.Debug("tryFiles 未匹配到任何静态资源，转交 PHP 处理", "request_path", requestPath)
 			return false
 		}
-		appCtx.Logger.Error("tryFiles 检查文件/目录时出错", "path", filePath, "error", err)
+		appCtx.Logger.Warn("tryFiles 拒绝访问", "request_path", requestPath, "error", err)
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return true
+	}
+	defer f.Close()
+
+	fileInfo, err := f.Stat()
+	if err != nil {
+		appCtx.Logger.Error("tryFiles 读取文件信息出错", "request_path", requestPath, "error", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return true
 	}
-
 	if fileInfo.IsDir() {
 		// 目录（包括 "/" 即 DocRoot 本身）交给 PHP 主入口处理
-		appCtx.Logger.Debug("tryFiles 匹配到目录，转交 PHP 处理", "path", filePath)
+		appCtx.Logger.Debug("tryFiles 匹配到目录，转交 PHP 处理", "request_path", requestPath)
 		return false
 	}
 
-	appCtx.Logger.Debug("tryFiles 匹配到文件，直接提供", "path", filePath)
-	http.ServeFile(w, r, filePath)
+	appCtx.Logger.Debug("tryFiles 匹配到文件，直接提供", "request_path", requestPath)
+	http.ServeContent(w, r, fileInfo.Name(), fileInfo.ModTime(), f)
 	return true
 }
 

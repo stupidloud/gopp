@@ -2,18 +2,24 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/http/fcgi"
 	"strings"
 	"testing"
 	"time"
 )
 
-// accelPHP 模拟下载脚本：?f= 文件路径，?t= token，?r= 速率（字节/秒）
+// accelPHP 模拟下载脚本：?f= 文件路径，?t= token，?r= 速率（字节/秒）；无 ?f= 时输出 "php:<SCRIPT_FILENAME>"
 func accelPHP(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	if q.Get("f") == "" {
+		fmt.Fprintf(w, "php:%s", fcgi.ProcessEnv(r)["SCRIPT_FILENAME"])
+		return
+	}
 	w.Header().Set("Content-Disposition", `attachment; filename="download"`)
 	w.Header().Set("X-Accel-Redirect", q.Get("f"))
 	if t := q.Get("t"); t != "" {
@@ -157,7 +163,7 @@ func TestAccelServe(t *testing.T) {
 	}{
 		{"文件不存在", "/?f=/files/missing.bin", 404},
 		{"目录", "/?f=/files", 403},
-		{"越界", "/?f=/../../etc/passwd", 403},
+		{"越界的路径被限制在 accel_root 内", "/?f=/../../etc/passwd", 404},
 	}
 	for _, tt := range errorCases {
 		t.Run(tt.name, func(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"log/slog"
@@ -97,6 +98,15 @@ func loadConfig(path string) (Config, error) {
 
 // prepare 校验配置并计算派生字段
 func (c *Config) prepare() error {
+	// SCRIPT_FILENAME 需要绝对路径
+	for _, dir := range []*string{&c.DocRoot, &c.AccelRoot} {
+		abs, err := filepath.Abs(*dir)
+		if err != nil {
+			return err
+		}
+		*dir = abs
+	}
+
 	c.trustedProxyNets = c.trustedProxyNets[:0:0]
 	for _, s := range c.TrustedProxies {
 		p, err := parseIPOrCIDR(s)
