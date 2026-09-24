@@ -170,6 +170,11 @@ func createPHPHandler(appCtx *AppContext) http.Handler {
 	)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isHiddenPath(r.URL.Path) {
+			appCtx.Logger.Debug("拒绝访问隐藏文件", "request_path", r.URL.Path)
+			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+			return
+		}
 		if handleTryFiles(appCtx, w, r) {
 			return
 		}
@@ -194,6 +199,16 @@ func createPHPHandler(appCtx *AppContext) http.Handler {
 			serveAccel(appCtx, w, r, rw)
 		}
 	})
+}
+
+// isHiddenPath 判断路径中是否有以 "." 开头的段（.env、.git/ 等），.well-known 除外
+func isHiddenPath(urlPath string) bool {
+	for _, seg := range strings.Split(path.Clean("/"+urlPath), "/") {
+		if strings.HasPrefix(seg, ".") && seg != ".well-known" {
+			return true
+		}
+	}
+	return false
 }
 
 // handleTryFiles 尝试直接提供静态文件。

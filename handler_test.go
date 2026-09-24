@@ -103,6 +103,11 @@ func TestTryFiles(t *testing.T) {
 	e.writeFile(e.docRoot, "sub/a.txt", "sub file")
 	e.writeFile(e.docRoot, "sub/page.php", "")
 	e.writeFile(e.docRoot, "dir.php/x", "")
+	e.writeFile(e.docRoot, ".env", "DB_PASSWORD=secret")
+	e.writeFile(e.docRoot, ".git/config", "[core]")
+	e.writeFile(e.docRoot, "sub/.htaccess", "deny")
+	e.writeFile(e.docRoot, ".hidden.php", "")
+	e.writeFile(e.docRoot, ".well-known/acme-challenge/tok", "acme")
 	mainScript := "php:" + filepath.Join(e.docRoot, "index.php")
 
 	tests := []struct {
@@ -121,6 +126,13 @@ func TestTryFiles(t *testing.T) {
 		{"子目录 PHP 脚本", "GET", "/sub/page.php", 200, "php:" + filepath.Join(e.docRoot, "sub/page.php")},
 		{"PHP 脚本不存在返回 404", "GET", "/missing.php", 404, "Not Found\n"},
 		{"以 .php 结尾的目录返回 404", "GET", "/dir.php", 404, "Not Found\n"},
+		{"隐藏文件", "GET", "/.env", 403, "Forbidden\n"},
+		{"隐藏目录", "GET", "/.git/config", 403, "Forbidden\n"},
+		{"子目录中的隐藏文件", "GET", "/sub/.htaccess", 403, "Forbidden\n"},
+		{"不存在的隐藏路径", "GET", "/.svn/entries", 403, "Forbidden\n"},
+		{"隐藏的 PHP 脚本", "GET", "/.hidden.php", 403, "Forbidden\n"},
+		{"经 .. 规范化后的隐藏文件", "GET", "/sub/../.env", 403, "Forbidden\n"},
+		{".well-known 放行", "GET", "/.well-known/acme-challenge/tok", 200, "acme"},
 		{"越界的 PHP 路径被限制在 doc_root 内", "GET", "/../../etc/x.php", 404, "Not Found\n"},
 		// 以下路径清理后指向 index.php，不得作为静态文件返回源码
 		{"末尾斜杠不泄露源码", "GET", "/index.php/", 200, mainScript},
