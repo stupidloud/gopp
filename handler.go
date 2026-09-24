@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -166,7 +168,9 @@ func createPHPHandler(appCtx *AppContext) http.Handler {
 	)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handleTryFiles(appCtx, w, r)
+		if handleTryFiles(appCtx, w, r) {
+			return
+		}
 
 		rw := &responseInterceptor{
 			ResponseWriter: w,
@@ -211,34 +215,38 @@ func createPHPHandler(appCtx *AppContext) http.Handler {
 	})
 }
 
-// handleTryFiles 尝试处理静态文件、目录或自定义错误页面。
-// 如果请求被处理，则返回 true；否则返回 false，表示应继续处理 PHP。
+// handleTryFiles 尝试直接提供静态文件。
+// 返回 true 表示请求已处理完毕；返回 false 表示应继续交给 PHP 处理。
 func handleTryFiles(appCtx *AppContext, w http.ResponseWriter, r *http.Request) bool {
-	requestPath := r.URL.Path
-
-	if strings.HasSuffix(requestPath, ".php") {
+	// 先规范化再判断后缀：否则 /index.php/、/index.php/. 不以 .php 结尾，
+	// 清理后却指向 index.php，会被当作静态文件返回 PHP 源码
+	requestPath := path.Clean("/" + r.URL.Path)
+	if strings.HasSuffix(strings.ToLower(requestPath), ".php") {
 		return false
 	}
 
-	filePath := filepath.Join(appCtx.Config.DocRoot, requestPath)
+	filePath := filepath.Join(appCtx.Config.DocRoot, filepath.FromSlash(requestPath))
 
 	fileInfo, err := os.Stat(filePath)
-	if err == nil {
-		if fileInfo.IsDir() {
-			appCtx.Logger.Debug("tryFiles 匹配到目录，返回 403", "path", filePath)
-			return true
+	if err != nil {
+		// ENOTDIR：如 /robots.txt/x，路径中间某段是文件
+		if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
+			appCtx.Logger.Debug("tryFiles 未匹配到任何静态资源，转交 PHP 处理", "request_path", requestPath)
+			return false
 		}
-		appCtx.Logger.Debug("tryFiles 匹配到文件，直接提供", "path", filePath)
-		http.ServeFile(w, r, filePath)
+		appCtx.Logger.Error("tryFiles 检查文件/目录时出错", "path", filePath, "error", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return true
 	}
 
-	if os.IsNotExist(err) {
-		appCtx.Logger.Debug("tryFiles 未匹配到任何静态资源，转交 PHP 处理", "request_path", requestPath)
+	if fileInfo.IsDir() {
+		// 目录（包括 "/" 即 DocRoot 本身）交给 PHP 主入口处理
+		appCtx.Logger.Debug("tryFiles 匹配到目录，转交 PHP 处理", "path", filePath)
 		return false
 	}
 
-	appCtx.Logger.Error("tryFiles 检查文件/目录时出错", "path", filePath, "error", err)
+	appCtx.Logger.Debug("tryFiles 匹配到文件，直接提供", "path", filePath)
+	http.ServeFile(w, r, filePath)
 	return true
 }
 
