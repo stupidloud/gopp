@@ -2,3 +2,4 @@
 /gopp_server
 /gopp
 /*.md
+!/README.md
