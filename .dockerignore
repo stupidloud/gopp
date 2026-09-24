@@ -1,0 +1,4 @@
+/gopp*
+*.md
+!README.md
+.git

@@ -6,6 +6,11 @@ doc_root: "/srv/gopp"               # PHP 与静态文件的根目录（默认 "
 accel_root: "/srv/protected_files"  # X-Accel-Redirect 文件的根目录（默认 "/srv/protected_files"）
 main_php_file: index.php            # 主入口：非 .php 且不是静态文件的请求都交给它（默认 index.php）
 
+# 以下三项仅用于内嵌 PHP 的构建（-tags frankenphp），此时不使用 fpm_network / fpm_address
+php_threads: 0                      # PHP 线程数，0 为 CPU 数的 2 倍（默认 0）
+php_worker_file: ""                 # worker 模式入口脚本（相对 doc_root），设置后原本交给 main_php_file 的请求改由它处理（默认空，不启用）
+php_worker_num: 0                   # worker 线程数，0 为 CPU 数的 2 倍（默认 0）
+
 # 可信代理（CIDR 或单个 IP）：仅当直连地址属于这些代理时才采信 X-Forwarded-For / X-Real-IP（默认为空）
 trusted_proxies:
   - 10.0.0.0/8

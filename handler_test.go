@@ -1,3 +1,5 @@
+//go:build !frankenphp
+
 package main
 
 import (
@@ -11,8 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/yookoala/gofast"
 )
 
 // testEnv 是一套完整的测试环境：临时 doc_root / accel_root、模拟的 PHP-FPM 后端和 gopp 服务器
@@ -51,10 +51,10 @@ func newTestEnv(t *testing.T, handler http.HandlerFunc) *testEnv {
 	}
 
 	appCtx := &AppContext{
-		Config:      cfg,
-		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		ConnFactory: gofast.SimpleConnFactory(cfg.FPMNetwork, cfg.FPMAddress),
+		Config: cfg,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	appCtx.PHP, _ = newPHPBackend(appCtx)
 	appCtx.Limiters = NewLimiterManager(cfg, appCtx.Logger)
 	srv := httptest.NewServer(createPHPHandler(appCtx))
 	t.Cleanup(srv.Close)

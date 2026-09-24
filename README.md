@@ -54,13 +54,31 @@ header('X-Accel-Limit-Rate: 1048576'); // 1 MB/s
 | `main_php_file` | 主入口脚本 |
 | `trusted_proxies` | 反向代理的地址（CIDR 或 IP）。只有直连地址属于其中时才采信 `X-Forwarded-For` / `X-Real-IP`，据此设置 `REMOTE_ADDR` |
 | `redis_*` | 见上文多实例限速 |
+| `php_threads` / `php_worker_file` / `php_worker_num` | 仅内嵌 PHP 版，见下文 |
 | `log_level` | `debug` / `info` / `warn` / `error` |
 
 收到 SIGTERM / SIGINT 时停止接受新连接，等待进行中的请求完成（最多 30 秒）后退出。
 
+## 内嵌 PHP 版（实验）
+
+以 `-tags frankenphp` 构建时，gopp 通过 [FrankenPHP](https://frankenphp.dev) 在进程内执行 PHP，不再需要 PHP-FPM（`fpm_*` 配置不再使用）。路由、静态文件、X-Accel-Redirect（仍为 sendfile 零拷贝）、限速均与 FPM 版相同。
+
+- `php_threads`：PHP 线程数，0 为 CPU 数的 2 倍
+- `php_worker_file`：worker 模式入口（相对 `doc_root`）。设置后，原本交给 `main_php_file` 的请求改由常驻的 worker 处理，应用只需启动一次（入口写法见 FrankenPHP 文档中的 `frankenphp_handle_request`）；直接请求的其他 `.php` 仍按普通方式执行
+- `php_worker_num`：worker 线程数，0 为 CPU 数的 2 倍，须小于 `php_threads`
+
+需要开启 ZTS 与 embed SAPI 的 libphp，产物动态链接 `libphp.so`，因此以 Docker 镜像交付：
+
+```sh
+docker build -t gopp-embed .
+docker run -v /srv:/srv -v /etc/gopp/config.yaml:/etc/gopp/config.yaml gopp-embed
+```
+
+PHP 扩展需在派生镜像中用 `install-php-extensions` 安装。注意：PHP 扩展崩溃会导致整个 gopp 进程退出（FPM 版只影响一个 worker 进程）。
+
 ## 构建与测试
 
-需要 Go 1.24+。
+需要 Go 1.26+。
 
 ```sh
 go build -o gopp .

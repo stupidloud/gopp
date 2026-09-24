@@ -1,3 +1,5 @@
+//go:build !frankenphp
+
 package main
 
 import (
@@ -29,15 +31,6 @@ func accelPHP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Accel-Limit-Rate", rate)
 	}
 	io.WriteString(w, "php body should be discarded")
-}
-
-// fileContent 生成可辨认的文件内容
-func fileContent(size int) string {
-	var b strings.Builder
-	for i := 0; b.Len() < size; i++ {
-		b.WriteByte(byte('a' + i%26))
-	}
-	return b.String()[:size]
 }
 
 func TestAccelServe(t *testing.T) {

@@ -21,6 +21,11 @@ type Config struct {
 	MainPHPFile    string   `yaml:"main_php_file"`
 	TrustedProxies []string `yaml:"trusted_proxies"`
 
+	// 以下仅用于内嵌 PHP 的构建（-tags frankenphp）
+	PHPThreads    int    `yaml:"php_threads"`     // PHP 线程数，0 为 CPU 数的 2 倍
+	PHPWorkerFile string `yaml:"php_worker_file"` // worker 模式入口脚本（相对 doc_root），为空不启用
+	PHPWorkerNum  int    `yaml:"php_worker_num"`  // worker 线程数，0 为 CPU 数的 2 倍
+
 	// Redis配置
 	RedisBackend   bool   `yaml:"redis_backend"`
 	RedisAddr      string `yaml:"redis_addr"`

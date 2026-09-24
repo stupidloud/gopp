@@ -1,3 +1,5 @@
+//go:build !frankenphp
+
 package main
 
 import (

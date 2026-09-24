@@ -10,16 +10,14 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
-
-	"github.com/yookoala/gofast"
 )
 
 // AppContext 包含应用程序运行所需的共享依赖项
 type AppContext struct {
-	Config      Config
-	Logger      *slog.Logger
-	ConnFactory gofast.ConnFactory
-	Limiters    *LimiterManager
+	Config   Config
+	Logger   *slog.Logger
+	PHP      phpBackend
+	Limiters *LimiterManager
 }
 
 const (
@@ -55,12 +53,15 @@ func main() {
 	appCtx.Logger.Info("日志系统初始化完成", "level", appCtx.Config.LogLevel.String())
 
 	appCtx.Logger.Info("启动 HTTP 代理服务器", "address", appCtx.Config.ListenAddr)
-	appCtx.Logger.Info("后端 PHP-FPM", "network", appCtx.Config.FPMNetwork, "address", appCtx.Config.FPMAddress)
 	appCtx.Logger.Info("文档根目录", "path", appCtx.Config.DocRoot)
 	appCtx.Logger.Info("X-Accel 根目录", "path", appCtx.Config.AccelRoot)
 	appCtx.Logger.Info("主 PHP 文件", "file", appCtx.Config.MainPHPFile)
 
-	appCtx.ConnFactory = gofast.SimpleConnFactory(appCtx.Config.FPMNetwork, appCtx.Config.FPMAddress)
+	appCtx.PHP, err = newPHPBackend(appCtx)
+	if err != nil {
+		appCtx.Logger.Error("初始化 PHP 后端失败", "error", err)
+		os.Exit(1)
+	}
 
 	appCtx.Limiters = NewLimiterManager(appCtx.Config, appCtx.Logger)
 	defer appCtx.Limiters.Close()
@@ -96,5 +97,6 @@ func main() {
 		appCtx.Logger.Warn("等待超时，强制关闭剩余连接", "error", err)
 		server.Close()
 	}
+	appCtx.PHP.Close()
 	appCtx.Logger.Info("服务器已停止")
 }

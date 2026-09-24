@@ -17,7 +17,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24.1'
+        go-version-file: go.mod
     - name: Vet
       run: go vet ./...
     - name: Test
@@ -49,3 +49,23 @@ jobs:
         # 添加到工作流摘要
         echo "### 构建产物下载链接 :rocket:" >> $GITHUB_STEP_SUMMARY
         echo "构建产物下载链接（72 小时内有效）: $UPLOAD_URL" >> $GITHUB_STEP_SUMMARY
+
+  # 内嵌 PHP 版（-tags frankenphp）：只做 vet 与测试，产物以 Dockerfile 构建镜像的方式交付
+  test-embed:
+    runs-on: ubuntu-latest
+    container: dunglas/frankenphp:1.12.7-builder-php8.4
+    services:
+      redis:
+        image: redis:7
+    env:
+      GOPP_TEST_REDIS: redis:6379
+      GOFLAGS: -buildvcs=false
+      CGO_ENABLED: 1
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Vet and test
+      run: |
+        export CGO_CFLAGS="$(php-config --includes)" CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)"
+        go vet -tags frankenphp,nowatcher,nomercure ./...
+        go test -race -tags frankenphp,nowatcher,nomercure ./...
