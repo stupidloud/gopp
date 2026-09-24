@@ -24,23 +24,28 @@ jobs:
       run: go test -race ./...
     - name: Build
       run: CGO_ENABLED=0 go build -v -trimpath -ldflags="-s -w" -o gopp .
-    - name: Upload artifact to 0x0.st
+    - name: Upload artifact to litterbox
       id: upload_step
       run: |
         # 压缩二进制文件
         echo "Compressing gopp binary..."
         gzip -c ./gopp > gopp.gz
-        
-        # 上传压缩后的文件到 0x0.st 并捕获 URL
-        echo "Uploading gopp.gz to 0x0.st..."
-        UPLOAD_URL=$(curl -F "file=@gopp.gz" https://0x0.st/)
-        
-        # 输出上传 URL 到日志
+
+        # 上传到 litterbox（catbox 的临时文件服务，保留 72 小时）并捕获 URL
+        echo "Uploading gopp.gz to litterbox..."
+        UPLOAD_URL=$(curl -sS --fail --retry 3 -F reqtype=fileupload -F time=72h -F "fileToUpload=@gopp.gz" \
+          https://litterbox.catbox.moe/resources/internals/api.php)
+
+        # 返回的不是链接（如服务关闭时返回的说明文字）则失败
+        case "$UPLOAD_URL" in
+          https://*) ;;
+          *) echo "::error::上传失败，返回：$UPLOAD_URL"; exit 1 ;;
+        esac
         echo "Uploaded to: $UPLOAD_URL"
-        
+
         # 设置步骤输出变量
         echo "artifact_url=$UPLOAD_URL" >> $GITHUB_OUTPUT
-        
+
         # 添加到工作流摘要
         echo "### 构建产物下载链接 :rocket:" >> $GITHUB_STEP_SUMMARY
-        echo "构建产物下载链接: $UPLOAD_URL" >> $GITHUB_STEP_SUMMARY
+        echo "构建产物下载链接（72 小时内有效）: $UPLOAD_URL" >> $GITHUB_STEP_SUMMARY
