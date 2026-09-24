@@ -46,8 +46,9 @@ jobs:
       uses: actions/setup-go@v5
       with:
         go-version-file: go.mod
-    - name: Cache static-php-cli
-      uses: actions/cache@v4
+    - name: Restore static-php-cli cache
+      id: spc_cache
+      uses: actions/cache/restore@v4
       with:
         # 只缓存编译结果，源码与下载包太大
         path: |
@@ -59,6 +60,16 @@ jobs:
       run: ./build-static.sh test
     - name: Build
       run: ./build-static.sh
+    # libphp 编译完就保存，不受测试、编译或上传失败的影响（actions/cache 只在整个任务成功时保存）
+    - name: Save static-php-cli cache
+      if: always() && steps.spc_cache.outputs.cache-hit != 'true' && hashFiles('.spc/libphp.stamp') != ''
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          .spc/spc
+          .spc/buildroot
+          .spc/libphp.stamp
+        key: ${{ steps.spc_cache.outputs.cache-primary-key }}
     - name: Upload artifact to litterbox
       id: upload_step
       run: .github/scripts/upload.sh gopp-static
