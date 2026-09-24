@@ -132,6 +132,35 @@ func phpScriptRouterSessionHandler(appCtx *AppContext) func(inner gofast.Session
 	}
 }
 
+// mapHeader 将请求头映射为 HTTP_* 参数（替代 gofast.MapHeader）：
+//   - 丢弃名称含下划线的请求头：Client-Ip 与 Client_Ip 都会映射为 HTTP_CLIENT_IP，
+//     取值将由 map 遍历顺序决定，还可借此覆盖代理设置的头（与 nginx underscores_in_headers off 一致）
+//   - 丢弃 Proxy 头，防止 httpoxy：HTTP_PROXY 会被不少 PHP HTTP 客户端当作出站代理配置
+//   - 多个 Cookie 头以 "; " 连接（gofast 用 ","，PHP 无法正确解析）
+func mapHeader(inner gofast.SessionHandler) gofast.SessionHandler {
+	return func(client gofast.Client, req *gofast.Request) (*gofast.ResponsePipe, error) {
+		r := req.Raw
+		if r.Host != "" {
+			req.Params["HTTP_HOST"] = r.Host
+		}
+		for k, v := range r.Header {
+			if strings.Contains(k, "_") || k == "Proxy" {
+				continue
+			}
+			key := strings.ReplaceAll(strings.ToUpper(k), "-", "_")
+			if key == "CONTENT_TYPE" || key == "CONTENT_LENGTH" {
+				continue // 已由 BasicParamsMap 设置
+			}
+			sep := ","
+			if key == "COOKIE" {
+				sep = "; "
+			}
+			req.Params["HTTP_"+key] = strings.Join(v, sep)
+		}
+		return inner(client, req)
+	}
+}
+
 // basicFastCGISetupSessionHandler 设置基本的 FastCGI 参数，如 DOCUMENT_ROOT 和 REMOTE_ADDR。
 func basicFastCGISetupSessionHandler(appCtx *AppContext) func(inner gofast.SessionHandler) gofast.SessionHandler {
 	return func(inner gofast.SessionHandler) gofast.SessionHandler {
@@ -159,7 +188,7 @@ func createPHPHandler(appCtx *AppContext) http.Handler {
 
 	phpSessionHandler := gofast.Chain(
 		gofast.BasicParamsMap,                   // 基本 CGI 参数
-		gofast.MapHeader,                        // HTTP 请求头
+		mapHeader,                               // HTTP 请求头
 		basicFastCGISetupSessionHandler(appCtx), // 设置 DOCUMENT_ROOT, REMOTE_ADDR 等
 		phpScriptRouterSessionHandler(appCtx),   // 设置 SCRIPT_FILENAME, SCRIPT_NAME
 	)(gofast.BasicSession) // 处理 FastCGI 通信
