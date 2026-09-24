@@ -12,14 +12,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// 定义日志级别常量
-const (
-	LevelDebug = slog.LevelDebug
-	LevelInfo  = slog.LevelInfo
-	LevelWarn  = slog.LevelWarn
-	LevelError = slog.LevelError
-)
-
 type Config struct {
 	ListenAddr     string   `yaml:"listen_addr"`
 	FPMNetwork     string   `yaml:"fpm_network"`
@@ -56,7 +48,7 @@ var defaultConfig = Config{
 	RedisPassword:  "",
 	RedisDB:        0,
 	RedisKeyPrefix: "gopp:rate:",
-	LogLevel:       LevelInfo, // 默认日志级别
+	LogLevel:       slog.LevelInfo,
 }
 
 // loadConfig 加载配置文件；required 为 false 时文件不存在则使用默认配置

@@ -169,12 +169,6 @@ func basicFastCGISetupSessionHandler(appCtx *AppContext) func(inner gofast.Sessi
 
 			realIP := GetRealIP(req.Raw, appCtx.Config.trustedProxyNets)
 			req.Params["REMOTE_ADDR"] = realIP
-			if forwardedFor := req.Raw.Header.Get("X-Forwarded-For"); forwardedFor != "" {
-				req.Params["HTTP_X_FORWARDED_FOR"] = forwardedFor
-			}
-			if realIPHeader := req.Raw.Header.Get("X-Real-IP"); realIPHeader != "" {
-				req.Params["HTTP_X_REAL_IP"] = realIPHeader
-			}
 			appCtx.Logger.Debug("设置基本 FastCGI 参数", "doc_root", appCtx.Config.DocRoot, "remote_addr", realIP)
 
 			return inner(client, req)
