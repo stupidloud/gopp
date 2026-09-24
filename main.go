@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -18,13 +19,28 @@ type AppContext struct {
 	Limiters    *LimiterManager
 }
 
+const (
+	// 只限制读取请求头的时间，不限制请求体（上传）和响应（下载）的时长：
+	// 慢客户端由前面的反向代理处理
+	readHeaderTimeout = 10 * time.Second
+	// 需长于反向代理到 gopp 的 keep-alive 空闲超时（nginx upstream 默认 60s），
+	// 否则代理可能复用 gopp 刚关闭的连接而偶发 502
+	idleTimeout = 120 * time.Second
+)
+
 func main() {
+	configPath := flag.String("config", "config.yaml", "配置文件路径")
+	flag.Parse()
+	configGiven := false
+	flag.Visit(func(f *flag.Flag) { configGiven = configGiven || f.Name == "config" })
+
 	var err error
 	appCtx := &AppContext{}
-	appCtx.Config, err = loadConfig("config.yaml")
+	// 未指定 -config 且默认的 config.yaml 不存在时使用默认配置
+	appCtx.Config, err = loadConfig(*configPath, configGiven)
 	if err != nil {
-		// 如果加载或解析 config.yaml 失败，记录警告并使用默认配置
-		fmt.Fprintf(os.Stderr, "警告：无法加载或解析 config.yaml：%v。使用默认配置。\n", err)
+		fmt.Fprintf(os.Stderr, "加载配置失败：%v\n", err)
+		os.Exit(1)
 	}
 
 	// 初始化日志
@@ -32,10 +48,6 @@ func main() {
 	appCtx.Logger = slog.New(logHandler)
 
 	appCtx.Logger.Info("日志系统初始化完成", "level", appCtx.Config.LogLevel.String())
-
-	readTimeout := time.Duration(appCtx.Config.ReadTimeoutSeconds) * time.Second
-	writeTimeout := time.Duration(appCtx.Config.WriteTimeoutSeconds) * time.Second
-	idleTimeout := time.Duration(appCtx.Config.IdleTimeoutSeconds) * time.Second
 
 	appCtx.Logger.Info("启动 HTTP 代理服务器", "address", appCtx.Config.ListenAddr)
 	appCtx.Logger.Info("后端 PHP-FPM", "network", appCtx.Config.FPMNetwork, "address", appCtx.Config.FPMAddress)
@@ -51,11 +63,10 @@ func main() {
 	phpHandler := createPHPHandler(appCtx)
 
 	server := &http.Server{
-		Addr:         appCtx.Config.ListenAddr,
-		Handler:      phpHandler,
-		ReadTimeout:  readTimeout,
-		WriteTimeout: writeTimeout,
-		IdleTimeout:  idleTimeout,
+		Addr:              appCtx.Config.ListenAddr,
+		Handler:           phpHandler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       idleTimeout,
 	}
 
 	appCtx.Logger.Info("服务器启动中...")

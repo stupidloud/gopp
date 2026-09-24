@@ -1,25 +1,24 @@
-# Gopp HTTP代理服务器配置
-listen_addr: ":8082"          # 监听的地址和端口（例如，":8080"，"127.0.0.1:8082"）
-fpm_network: "tcp"            # PHP - FPM连接的网络类型（"tcp" 或 "unix"）
-fpm_address: "127.0.0.1:9000" # PHP - FPM的地址（例如，"127.0.0.1:9000" 或 "/run/php/php8.1 - fpm.sock"）
-doc_root: "/srv/gopp"         # PHP文件的文档根目录
-accel_root: "/srv/protected_files"       # X - Accel - Redirect文件的根目录
-read_timeout_seconds: 15      # HTTP服务器读取超时时间（秒）
-write_timeout_seconds: 0     # HTTP服务器写入超时时间（秒）
-idle_timeout_seconds: 0     # HTTP服务器空闲超时时间（秒）
-main_php_file: index.php
+# gopp 配置示例。省略的项使用括号中的默认值。
+listen_addr: ":8082"                # 监听地址（默认 ":8082"）
+fpm_network: "tcp"                  # 连接 PHP-FPM 的网络类型："tcp" 或 "unix"（默认 "tcp"）
+fpm_address: "127.0.0.1:9000"       # PHP-FPM 地址，如 "127.0.0.1:9000" 或 "/run/php/php8.4-fpm.sock"（默认 "127.0.0.1:9000"）
+doc_root: "/srv/gopp"               # PHP 与静态文件的根目录（默认 "/srv/gopp"）
+accel_root: "/srv/protected_files"  # X-Accel-Redirect 文件的根目录（默认 "/srv/protected_files"）
+main_php_file: index.php            # 主入口：非 .php 且不是静态文件的请求都交给它（默认 index.php）
+
+# 可信代理（CIDR 或单个 IP）：仅当直连地址属于这些代理时才采信 X-Forwarded-For / X-Real-IP（默认为空）
 trusted_proxies:
   - 10.0.0.0/8
   - 172.16.0.0/12
   - 192.168.0.0/16
 
-# Redis后端配置（用于令牌桶限速器）
-redis_backend: true          # 是否使用Redis后端存储令牌桶状态，true = 使用Redis，false = 使用内存
-redis_addr: "localhost:6379"  # Redis服务器地址
-redis_password: ""            # Redis密码（如果有）
-redis_db: 0                   # Redis数据库索引
-redis_key_prefix: "gopp:rate:" # Redis键前缀
-redis_key_ttl: 30           # Redis键TTL（过期时间，秒）
+# 带宽限制（PHP 通过 X-Accel-Token-Id / X-Accel-Limit-Rate 指定）
+# true：同一 token 的速率在所有实例间共享（Redis 全局令牌桶），Redis 故障时退回本地限速
+# false：仅在本实例内共享（默认 false）
+redis_backend: true
+redis_addr: "localhost:6379"        # （默认 "localhost:6379"）
+redis_password: ""                  # （默认空）
+redis_db: 0                         # （默认 0）
+redis_key_prefix: "gopp:rate:"      # 令牌桶 key 前缀（默认 "gopp:rate:"）
 
-# 新增日志级别配置
-log_level: debug               # 日志级别，可取值为debug, info, warn, error等
+log_level: info                     # debug / info / warn / error（默认 info）
