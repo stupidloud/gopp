@@ -55,6 +55,7 @@ func newTestEnv(t *testing.T, handler http.HandlerFunc) *testEnv {
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ConnFactory: gofast.SimpleConnFactory(cfg.FPMNetwork, cfg.FPMAddress),
 	}
+	appCtx.Limiters = NewLimiterManager(cfg, appCtx.Logger)
 	srv := httptest.NewServer(createPHPHandler(appCtx))
 	t.Cleanup(srv.Close)
 

@@ -196,17 +196,8 @@ func createPHPHandler(appCtx *AppContext) http.Handler {
 				return
 			}
 
-			var sharedLimiter *RedisCellLimiter
-			if rw.accelTokenID != "" && rw.accelLimitBytes > 0 {
-				limiter, err := GetOrCreateLimiter(rw.appCtx, rw.accelTokenID, int64(rw.accelLimitBytes))
-				if err != nil {
-					// 如果 Redis 未初始化或 GetOrCreateLimiter 失败，记录错误
-					rw.appCtx.Logger.Error("无法获取带宽限制器，将不进行限制", "token_id", rw.accelTokenID, "error", err)
-				} else {
-					rw.appCtx.Logger.Debug("获取或创建带宽限制器", "token_id", rw.accelTokenID, "limit_bytes", rw.accelLimitBytes)
-					sharedLimiter = limiter
-				}
-			}
+			// 指定了 token 时同一 token 的所有连接共享速率，否则只限制本连接
+			sharedLimiter := appCtx.Limiters.Get(rw.accelTokenID, rw.accelLimitBytes)
 
 			sendFileWithSendfile(rw.appCtx, r.Context(), rw, r, cleanTargetPath, fileInfo, sharedLimiter)
 		}
@@ -315,7 +306,7 @@ func (rw *responseInterceptor) Flush() {
 
 // sendFileWithSendfile 使用sendfile系统调用发送文件，并应用传入的令牌桶限速器
 func sendFileWithSendfile(appCtx *AppContext, ctx context.Context, w *responseInterceptor, r *http.Request, filePath string,
-	fileInfo os.FileInfo, limiter *RedisCellLimiter) {
+	fileInfo os.FileInfo, limiter Limiter) {
 
 	originalWriter := w.ResponseWriter
 	originalWriter.Header().Set("Accept-Ranges", "bytes")
@@ -428,7 +419,7 @@ func sendFileWithSendfile(appCtx *AppContext, ctx context.Context, w *responseIn
 		chunkSize := int(math.Min(float64(bytesToSend-sentBytes), float64(1<<18))) // 最大 256KB
 
 		if limiter != nil {
-			waitErr := limiter.WaitN(ctx, int64(chunkSize))
+			waitErr := limiter.WaitN(ctx, chunkSize)
 			if waitErr != nil {
 				appCtx.Logger.Warn("速率限制器等待错误，停止传输", "error", waitErr)
 				break

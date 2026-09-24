@@ -7,8 +7,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/go-redis/redis/v8"
-
 	"github.com/yookoala/gofast"
 )
 
@@ -17,7 +15,7 @@ type AppContext struct {
 	Config      Config
 	Logger      *slog.Logger
 	ConnFactory gofast.ConnFactory
-	RedisClient *redis.Client
+	Limiters    *LimiterManager
 }
 
 func main() {
@@ -47,21 +45,8 @@ func main() {
 
 	appCtx.ConnFactory = gofast.SimpleConnFactory(appCtx.Config.FPMNetwork, appCtx.Config.FPMAddress)
 
-	// 初始化带宽管理器 (如果配置了 Redis)
-	if appCtx.Config.RedisBackend {
-		appCtx.Logger.Info("配置使用 Redis 后端进行带宽限制")
-		err := InitBandwidthManager(appCtx)
-		if err != nil {
-			appCtx.Logger.Error("无法初始化 Redis 带宽管理器", "error", err)
-			os.Exit(1) // 初始化失败则退出
-		} else {
-			appCtx.Logger.Info("成功初始化 Redis 带宽管理器")
-		}
-	} else {
-		appCtx.Logger.Info("未配置 Redis 后端，带宽限制功能将不可用")
-		// 注意：如果未配置 Redis，带宽限制功能将不可用。
-		// GetOrCreateLimiter 在 Redis 未初始化时会返回错误。
-	}
+	appCtx.Limiters = NewLimiterManager(appCtx.Config, appCtx.Logger)
+	defer appCtx.Limiters.Close()
 
 	phpHandler := createPHPHandler(appCtx)
 
