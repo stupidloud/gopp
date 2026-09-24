@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
+	"strings"
 
 	"log/slog"
 
@@ -38,6 +40,8 @@ type Config struct {
 	RedisKeyTTL    int    `yaml:"redis_key_ttl"`
 
 	LogLevel slog.Level `yaml:"log_level"`
+
+	trustedProxyNets []netip.Prefix // 由 TrustedProxies 解析得到
 }
 
 var defaultConfig = Config{
@@ -85,5 +89,39 @@ func loadConfig(path string) (Config, error) {
 		config.MainPHPFile = defaultConfig.MainPHPFile
 	}
 
+	if err := config.prepare(); err != nil {
+		return config, fmt.Errorf("invalid config file %s: %w", path, err)
+	}
 	return config, nil
+}
+
+// prepare 校验配置并计算派生字段
+func (c *Config) prepare() error {
+	c.trustedProxyNets = c.trustedProxyNets[:0:0]
+	for _, s := range c.TrustedProxies {
+		p, err := parseIPOrCIDR(s)
+		if err != nil {
+			return fmt.Errorf("trusted_proxies: %w", err)
+		}
+		c.trustedProxyNets = append(c.trustedProxyNets, p)
+	}
+	return nil
+}
+
+// parseIPOrCIDR 解析 "10.0.0.0/8" 或单个 IP（视为 /32 或 /128）
+func parseIPOrCIDR(s string) (netip.Prefix, error) {
+	s = strings.TrimSpace(s)
+	if strings.Contains(s, "/") {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return netip.Prefix{}, err
+		}
+		return p.Masked(), nil
+	}
+	ip, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	ip = ip.Unmap()
+	return netip.PrefixFrom(ip, ip.BitLen()), nil
 }

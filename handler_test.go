@@ -46,6 +46,9 @@ func newTestEnv(t *testing.T, handler http.HandlerFunc) *testEnv {
 	cfg.AccelRoot = t.TempDir()
 	cfg.FPMNetwork = "tcp"
 	cfg.FPMAddress = ln.Addr().String()
+	if err := cfg.prepare(); err != nil {
+		t.Fatal(err)
+	}
 
 	appCtx := &AppContext{
 		Config:      cfg,

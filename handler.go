@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path"
 	"path/filepath"
@@ -18,51 +19,48 @@ import (
 	"github.com/yookoala/gofast"
 )
 
-// GetRealIP 从请求中获取真实的客户端IP地址
-// 如果请求来自可信代理，会检查X-Forwarded-For头
-func GetRealIP(r *http.Request, trustedProxies []string) string {
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+// GetRealIP 获取客户端真实 IP。
+// 只有直连地址（RemoteAddr）属于可信代理时才采信 X-Forwarded-For / X-Real-IP：
+// X-Forwarded-For 从右往左跳过可信代理，取第一个不可信地址；遇到非法值即停止，
+// 以已确认的最后一跳为准。
+func GetRealIP(r *http.Request, trustedProxies []netip.Prefix) string {
+	ap, err := netip.ParseAddrPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr // 如果无法解析RemoteAddr，则直接返回原始值
+		return r.RemoteAddr
+	}
+	ip := ap.Addr().Unmap()
+	if !isTrustedProxy(ip, trustedProxies) {
+		return ip.String()
 	}
 
-	forwardedFor := r.Header.Get("X-Forwarded-For")
-	if forwardedFor != "" {
-		ips := strings.Split(forwardedFor, ",")
-		for i := 0; i < len(ips); i++ {
-			clientIP := strings.TrimSpace(ips[i])
-			if clientIP == "" {
-				continue
+	if values := r.Header.Values("X-Forwarded-For"); len(values) > 0 {
+		hops := strings.Split(strings.Join(values, ","), ",")
+		for i := len(hops) - 1; i >= 0; i-- {
+			hop, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
+			if err != nil {
+				break
 			}
-
-			// 检查 clientIP 是否为可信代理
-			isTrustedProxy := false
-			for _, proxy := range trustedProxies {
-				if proxy == clientIP {
-					isTrustedProxy = true
-					break
-				}
-				// 支持CIDR格式
-				if strings.Contains(proxy, "/") {
-					_, ipnet, cidrErr := net.ParseCIDR(proxy)
-					if cidrErr == nil && ipnet.Contains(net.ParseIP(clientIP)) {
-						isTrustedProxy = true
-						break
-					}
-				}
-			}
-
-			if !isTrustedProxy {
-				return clientIP
+			ip = hop.Unmap()
+			if !isTrustedProxy(ip, trustedProxies) {
+				break
 			}
 		}
+		return ip.String()
 	}
 
-	if clientIP := r.Header.Get("X-Real-IP"); clientIP != "" {
-		return clientIP
+	if realIP, err := netip.ParseAddr(strings.TrimSpace(r.Header.Get("X-Real-IP"))); err == nil {
+		return realIP.Unmap().String()
 	}
+	return ip.String()
+}
 
-	return ip
+func isTrustedProxy(ip netip.Addr, trustedProxies []netip.Prefix) bool {
+	for _, p := range trustedProxies {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // secureJoinPath 安全地将基础路径和请求路径连接起来，并检查结果路径是否在基础路径内。
@@ -136,7 +134,7 @@ func basicFastCGISetupSessionHandler(appCtx *AppContext) func(inner gofast.Sessi
 		return func(client gofast.Client, req *gofast.Request) (*gofast.ResponsePipe, error) {
 			req.Params["DOCUMENT_ROOT"] = appCtx.Config.DocRoot
 
-			realIP := GetRealIP(req.Raw, appCtx.Config.TrustedProxies)
+			realIP := GetRealIP(req.Raw, appCtx.Config.trustedProxyNets)
 			req.Params["REMOTE_ADDR"] = realIP
 			if forwardedFor := req.Raw.Header.Get("X-Forwarded-For"); forwardedFor != "" {
 				req.Params["HTTP_X_FORWARDED_FOR"] = forwardedFor
