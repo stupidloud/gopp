@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/yookoala/gofast"
@@ -26,6 +29,8 @@ const (
 	// 需长于反向代理到 gopp 的 keep-alive 空闲超时（nginx upstream 默认 60s），
 	// 否则代理可能复用 gopp 刚关闭的连接而偶发 502
 	idleTimeout = 120 * time.Second
+	// 停机时等待进行中请求（含下载）完成的最长时间，超时后强制关闭
+	shutdownTimeout = 30 * time.Second
 )
 
 func main() {
@@ -69,12 +74,27 @@ func main() {
 		IdleTimeout:       idleTimeout,
 	}
 
-	appCtx.Logger.Info("服务器启动中...")
-	err = server.ListenAndServe()
-	if err != nil && err != http.ErrServerClosed {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.ListenAndServe() }()
+	appCtx.Logger.Info("服务器已启动")
+
+	select {
+	case err := <-errCh:
 		appCtx.Logger.Error("无法在指定地址监听", "address", appCtx.Config.ListenAddr, "error", err)
 		os.Exit(1)
+	case <-ctx.Done():
 	}
+	stop() // 恢复默认信号处理：再次收到信号时立即退出
 
-	appCtx.Logger.Info("服务器已优雅停止")
+	appCtx.Logger.Info("收到停止信号，等待进行中的请求完成", "timeout", shutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		appCtx.Logger.Warn("等待超时，强制关闭剩余连接", "error", err)
+		server.Close()
+	}
+	appCtx.Logger.Info("服务器已停止")
 }
