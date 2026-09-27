@@ -8,6 +8,8 @@ main_php_file: index.php            # 主入口：非 .php 且不是静态文件
 
 # 可信代理（CIDR 或单个 IP）：仅当直连地址属于这些代理时才采信 X-Forwarded-For / X-Real-IP（默认为空）
 trusted_proxies:
+  - 127.0.0.1                       # 本机的反向代理（nginx / HAProxy 等）
+  - ::1
   - 10.0.0.0/8
   - 172.16.0.0/12
   - 192.168.0.0/16

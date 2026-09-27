@@ -14,7 +14,7 @@ func TestExampleConfigMatchesDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := defaultConfig
-	want.TrustedProxies = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+	want.TrustedProxies = []string{"127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
 	want.RedisBackend = true
 	if err := want.prepare(); err != nil {
 		t.Fatal(err)
