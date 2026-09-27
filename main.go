@@ -67,23 +67,30 @@ func main() {
 
 	phpHandler := createPHPHandler(appCtx)
 
+	tracker := newConnTracker()
 	server := &http.Server{
-		Addr:              appCtx.Config.ListenAddr,
 		Handler:           phpHandler,
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
+		ConnState:         tracker.hook,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// 在 PHP 后端就绪后才开始监听：reuse_port 替换时，新进程加入监听即可立即处理请求
+	ln, err := listen(appCtx.Config.ListenAddr, appCtx.Config.ReusePort)
+	if err != nil {
+		appCtx.Logger.Error("无法在指定地址监听", "address", appCtx.Config.ListenAddr, "error", err)
+		os.Exit(1)
+	}
 	errCh := make(chan error, 1)
-	go func() { errCh <- server.ListenAndServe() }()
-	appCtx.Logger.Info("服务器已启动")
+	go func() { errCh <- server.Serve(ln) }()
+	appCtx.Logger.Info("服务器已启动", "pid", os.Getpid(), "reuse_port", appCtx.Config.ReusePort)
 
 	select {
 	case err := <-errCh:
-		appCtx.Logger.Error("无法在指定地址监听", "address", appCtx.Config.ListenAddr, "error", err)
+		appCtx.Logger.Error("服务器异常退出", "error", err)
 		os.Exit(1)
 	case <-ctx.Done():
 	}
@@ -92,7 +99,7 @@ func main() {
 	appCtx.Logger.Info("收到停止信号，等待进行中的请求完成", "timeout", shutdownTimeout)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
+	if err := gracefulStop(shutdownCtx, server, ln, tracker); err != nil {
 		appCtx.Logger.Warn("等待超时，强制关闭剩余连接", "error", err)
 		server.Close()
 	}

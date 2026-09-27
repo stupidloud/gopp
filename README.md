@@ -56,7 +56,28 @@ header('X-Accel-Limit-Rate: 1048576'); // 1 MB/s
 | `redis_*` | 见上文多实例限速 |
 | `log_level` | `debug` / `info` / `warn` / `error` |
 
-收到 SIGTERM / SIGINT 时停止接受新连接，等待进行中的请求完成（最多 30 秒）后退出。
+收到 SIGTERM / SIGINT 时停止接受新连接，等待进行中的请求完成（最多 30 秒）后退出；等待期间再次收到信号则立即退出。
+
+### 不停服替换二进制
+
+配置 `reuse_port: true` 后，新旧两个 gopp 可同时监听同一端口（SO_REUSEPORT）：
+
+```sh
+# 1. 用 mv 替换文件（直接 cp 覆盖运行中的程序会报 Text file busy；mv 不影响运行中的旧进程）
+cp gopp-new /usr/local/bin/gopp.new && mv /usr/local/bin/gopp.new /usr/local/bin/gopp
+# 2. 启动新进程，日志出现「服务器已启动」（带 pid）即开始分担请求
+nohup /usr/local/bin/gopp -config /etc/gopp/config.yaml >>/var/log/gopp.log 2>&1 &
+# 3. 确认新进程正常后停止旧进程：它不再接受新连接，处理完进行中的请求（含下载）后退出
+kill -TERM <旧进程 pid>
+```
+
+还需开启内核参数（Linux 5.14+），否则旧进程关闭监听的瞬间，已排在其队列中尚未处理的连接会被重置：
+
+```sh
+echo 'net.ipv4.tcp_migrate_req = 1' > /etc/sysctl.d/99-gopp.conf && sysctl -p /etc/sysctl.d/99-gopp.conf
+```
+
+实测替换过程中持续压测（每请求新建连接）无失败请求。注意新旧进程并存期间：未开启 `redis_backend` 时同一 token 的限速在两个进程中各算一份；内嵌版的 APCu 缓存不共享，新进程的 opcache 需重新预热。开启 `reuse_port` 后误启动第二个实例不会报端口占用。
 
 ## 构建与测试
 

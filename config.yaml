@@ -1,5 +1,7 @@
 # gopp 配置示例。省略的项使用括号中的默认值。
 listen_addr: ":8082"                # 监听地址（默认 ":8082"）
+# 允许多个 gopp 同时监听同一端口（SO_REUSEPORT），用于不停服替换二进制，见 README（默认 false）
+reuse_port: false
 fpm_network: "tcp"                  # 连接 PHP-FPM 的网络类型："tcp" 或 "unix"（默认 "tcp"）
 fpm_address: "127.0.0.1:9000"       # PHP-FPM 地址，如 "127.0.0.1:9000" 或 "/run/php/php8.4-fpm.sock"（默认 "127.0.0.1:9000"）
 doc_root: "/srv/gopp"               # PHP 与静态文件的根目录（默认 "/srv/gopp"）

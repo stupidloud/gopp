@@ -14,6 +14,7 @@ import (
 
 type Config struct {
 	ListenAddr     string   `yaml:"listen_addr"`
+	ReusePort      bool     `yaml:"reuse_port"`
 	FPMNetwork     string   `yaml:"fpm_network"`
 	FPMAddress     string   `yaml:"fpm_address"`
 	DocRoot        string   `yaml:"doc_root"`
